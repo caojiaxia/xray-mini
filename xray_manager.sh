@@ -301,18 +301,44 @@ show_node_info() {
     read -p "按回车键返回菜单..."
 }
 
-# --- 5. 卸载  ---
+# --- 5. 彻底卸载---
 uninstall_all() {
-    echo -e "${RED}确定要卸载吗？[y/n]: ${PLAIN}"
-    read -p "" confirm
+    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray 服务 ！！！${PLAIN}"
+    read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
     [[ "$confirm" != "y" ]] && return
+
+    echo -e "${YELLOW}[1/5] 正在停止相关服务与进程...${PLAIN}"
     systemctl stop xray >/dev/null 2>&1
-    rm -rf /usr/local/etc/xray /etc/systemd/system/xray.service /usr/local/bin/xray
+    pkill -9 xray >/dev/null 2>&1
     pkill -f cloudflared >/dev/null 2>&1
-    rm -f /usr/local/bin/cloudflared
+
+    echo -e "${YELLOW}[2/5] 正在移除 Systemd 服务定义...${PLAIN}"
+    systemctl disable xray >/dev/null 2>&1
+    rm -f /etc/systemd/system/xray.service
     systemctl daemon-reload
-    echo -e "${GREEN}卸载完成！${PLAIN}"
-    read -p "按回车键返回..."
+
+    echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
+    # 彻底删除整个 xray 目录（含所有 json 和 certs）
+    rm -rf /usr/local/etc/xray
+    # 删除可执行二进制文件
+    rm -f /usr/local/bin/xray
+    rm -f /usr/local/bin/cloudflared
+
+    echo -e "${YELLOW}[4/5] 正在清理临时文件与日志...${PLAIN}"
+    rm -f /tmp/cloudflared.log
+    rm -f /tmp/cf_tunnel_domain
+    # 可选：清理 acme.sh 证书脚本（如果不想要了可以去掉下面两行的注释）
+    # rm -rf ~/.acme.sh
+    # sed -i '/acme.sh/d' ~/.bashrc
+
+    echo -e "${YELLOW}[5/5] 正在清理残留依赖...${PLAIN}"
+    # 仅清理脚本生成的 cron 任务（如果存在）
+    crontab -l | grep -v "acme.sh" | crontab - >/dev/null 2>&1
+
+    echo -e "------------------------------------------------"
+    echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
+    echo -e "------------------------------------------------"
+    read -p "按回车键返回菜单..."
 }
 
 # --- [主菜单模块] (严格遵循你要求的横排/纵向样式) ---
