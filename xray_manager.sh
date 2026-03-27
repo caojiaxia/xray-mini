@@ -381,8 +381,10 @@ uninstall_all() {
     read -p "按回车键返回菜单..."
 }
 
+# --- [主菜单模块] ---
 main_menu() {
     while true; do
+        clear
         echo -e "
 ${CYAN}==========================================
       BoGe Xray & CF Tunnel 一键脚本
@@ -398,12 +400,13 @@ ${CYAN}==========================================
             1) install_vless_direct ;;
             2) install_cf_tunnel ;;
             3) show_node_info ;;
-            4) echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf && echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf && sysctl -p ;;
+            4) enable_bbr ;; # 这里的模块调用已经修正
             5) uninstall_all ;;
             0) exit 0 ;;
+            *) echo -e "${RED}输入错误，请重新选择${PLAIN}" && sleep 1 ;;
         esac
     done
 }
 
-# 核心修复：在这里调用函数
+# 脚本入口
 main_menu
