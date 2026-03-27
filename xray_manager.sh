@@ -33,7 +33,7 @@ install_dependencies() {
     echo -e "${GREEN}依赖安装完成。${PLAIN}"
 }
 
-# 2. 证书申请模块 (包含 Standalone 和 API 模式)
+# 2. 证书申请模块
 manage_certs() {
     echo -e "${BLUE}[2/5] 开始证书管理程序...${PLAIN}"
     read -p "请输入您的解析域名: " domain
@@ -62,7 +62,7 @@ manage_certs() {
         if ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain --debug; then
             echo -e "${GREEN}API 模式证书申请成功！${PLAIN}"
         else
-            echo -e "${RED}申请失败，请检查 API Key 是否正确。${PLAIN}"
+            echo -e "${RED}申请失败，请检查 API Key。${PLAIN}"
             exit 1
         fi
     else
@@ -70,7 +70,7 @@ manage_certs() {
         if ~/.acme.sh/acme.sh --issue -d $domain --standalone --debug; then
             echo -e "${GREEN}Standalone 模式证书申请成功！${PLAIN}"
         else
-            echo -e "${RED}申请失败，请确保 80 端口已放行且域名解析正确。${PLAIN}"
+            echo -e "${RED}申请失败，请检查 80 端口。${PLAIN}"
             exit 1
         fi
     fi
@@ -90,16 +90,14 @@ install_vless_xhttp() {
     uuid=$(cat /proc/sys/kernel/random/uuid)
     echo -e "生成随机 UUID: ${CYAN}$uuid${PLAIN}"
     
-    read -p "设置监听端口 (回车随机, 如需配隧道建议8080): " port
+    read -p "设置监听端口 (回车随机, 隧道建议 8080): " port
     [[ -z "$port" ]] && port=$((RANDOM % 55535 + 10000))
     
     read -p "设置 xhttp 路径 (回车随机): " path
     [[ -z "$path" ]] && path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     
-    read -p "设置伪装域名 (SNI, 回车默认 www.bing.com): " sni
+    read -p "设置伪装域名 (SNI, 默认 www.bing.com): " sni
     [[ -z "$sni" ]] && sni="www.bing.com"
-    
-    echo -e "${YELLOW}正在生成 Xray 配置文件 ($XRAY_CONFIG)...${PLAIN}"
     
     cat <<EOF > $XRAY_CONFIG
 {
@@ -132,55 +130,52 @@ install_vless_xhttp() {
     "outbounds": [{"protocol": "freedom"}]
 }
 EOF
-    echo -e "${GREEN}配置文件写入成功。正在启动服务...${PLAIN}"
     systemctl enable xray && systemctl restart xray
-    echo -e "${GREEN}Xray 服务已就绪 (端口: $port)！${PLAIN}"
+    echo -e "${GREEN}Xray 服务已就绪！本地端口: $port${PLAIN}"
 }
 
-# 4. Cloudflare Tunnel 隧道配置 (新增临时隧道逻辑)
+# 4. Cloudflare Tunnel 隧道配置 (修复版)
 install_cf_tunnel() {
     echo -e "${BLUE}[4/5] 正在部署 Cloudflare Tunnel...${PLAIN}"
-    echo -e "${YELLOW}正在获取最新版 cloudflared 二进制...${PLAIN}"
+    
+    # 强制下载 x86_64 版本
     wget -O /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
     chmod +x /usr/local/bin/cloudflared
     
     echo -e "\n${CYAN}请选择隧道类型:${PLAIN}"
-    echo -e "1. 固定隧道 (Named Tunnel, 需登录授权)"
-    echo -e "2. 临时隧道 (TryCloudflare, 自动生成域名)"
+    echo -e "1. 固定隧道 (需登录授权)"
+    echo -e "2. 临时隧道 (TryCloudflare)"
     read -p "请输入选择 [1-2]: " tunnel_type
 
     if [[ "$tunnel_type" == "2" ]]; then
-        echo -e "${YELLOW}正在启动临时隧道...${PLAIN}"
-        read -p "请输入 Xray 监听的本地端口 (默认 8080): " local_port
+        read -p "请输入 Xray 监听的本地端口 (刚才设置的端口, 默认 8080): " local_port
         [[ -z "$local_port" ]] && local_port=8080
         
-        # 杀掉之前的临时隧道进程
+        echo -e "${YELLOW}正在通过 HTTP2 协议启动隧道并等待域名全路径...${PLAIN}"
         pkill -f cloudflared > /dev/null 2>&1
         rm -f $CF_LOG
         
-        # 后台运行临时隧道并记录日志
-        nohup cloudflared tunnel --url http://localhost:$local_port > $CF_LOG 2>&1 &
+        # 使用 --protocol http2 提高稳定性
+        nohup /usr/local/bin/cloudflared tunnel --protocol http2 --url http://localhost:$local_port > $CF_LOG 2>&1 &
         
-        echo -n "正在等待隧道分配域名..."
-        sleep 5
-        tunnel_url=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1)
-        
-        if [[ -n "$tunnel_url" ]]; then
-            echo -e "\n${GREEN}临时隧道已就绪！${PLAIN}"
-            echo -e "隧道地址: ${CYAN}$tunnel_url${PLAIN}"
-            echo -e "${YELLOW}注意: 临时隧道重启服务器后需重新运行脚本开启。${PLAIN}"
-        else
-            echo -e "\n${RED}隧道启动超时，请查看日志: $CF_LOG${PLAIN}"
-        fi
+        # 增加循环检测，每秒检查一次，共 30 秒
+        for i in {1..30}; do
+            echo -ne "\r检测中: ${i}s..."
+            tunnel_url=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1)
+            if [[ -n "$tunnel_url" ]]; then
+                echo -e "\n${GREEN}临时隧道获取成功！${PLAIN}"
+                echo -e "地址: ${CYAN}$tunnel_url${PLAIN}"
+                return 0
+            fi
+            sleep 1
+        done
+        echo -e "\n${RED}获取超时，请手动运行命令检查: cat $CF_LOG${PLAIN}"
     else
-        echo -e "${PURPLE}--- 固定隧道配置说明 ---${PLAIN}"
-        echo -e "1. 请执行 ${CYAN}cloudflared tunnel login${PLAIN} 进行授权"
-        echo -e "2. 固定隧道回源端口建议设为: ${CYAN}8080${PLAIN}"
-        echo -e "3. 前端随机端口需在 CF 控制面板手动映射。"
+        echo -e "固定隧道请先运行: ${CYAN}cloudflared tunnel login${PLAIN}"
     fi
 }
 
-# 5. 节点输出链接
+# 5. 节点输出链接 (增强临时域名识别)
 show_node_links() {
     if [[ ! -f $XRAY_CONFIG ]]; then
         echo -e "${RED}错误：未发现配置文件！${PLAIN}"
@@ -198,46 +193,39 @@ show_node_links() {
     echo -e "${BLUE}本地端口:${PLAIN} $_port"
     echo -e "${BLUE}UUID:${PLAIN} $_uuid"
     echo -e "${BLUE}路径:${PLAIN} $_path"
-    echo -e "${BLUE}ALPN:${PLAIN} h2, http/1.1"
     echo -e "------------------------------------------"
     
-    # 尝试显示临时隧道地址
+    # 动态获取日志里的临时域名
     if [[ -f $CF_LOG ]]; then
         local _tmp_url=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1)
         if [[ -n "$_tmp_url" ]]; then
-            echo -e "${BLUE}临时隧道:${PLAIN} $_tmp_url (回源端口: $_port)"
+            echo -e "${PURPLE}临时隧道 URL:${PLAIN} ${_tmp_url}"
         fi
     fi
     
-    echo -e "${YELLOW}VLESS 链接 (直连/API域名):${PLAIN}"
-    echo -e "${CYAN}vless://$_uuid@$_domain:$_port?security=tls&sni=$_sni&type=xhttp&mode=auto&path=${_path}#BoGe_XHTTP_TLS${PLAIN}"
+    echo -e "${YELLOW}VLESS 链接:${PLAIN}"
+    echo -e "${CYAN}vless://$_uuid@$_domain:$_port?security=tls&sni=$_sni&type=xhttp&mode=auto&path=${_path}#BoGe_XHTTP${PLAIN}"
     echo -e "------------------------------------------"
 }
 
 # 6. BBR 加速安装
 install_bbr() {
     echo -e "${BLUE}正在开启 BBR 加速...${PLAIN}"
-    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p
-    echo -e "${GREEN}BBR 加速内核参数已应用！${PLAIN}"
+    echo -e "${GREEN}BBR 已开启！${PLAIN}"
 }
 
 # 7. 卸载功能
 uninstall_all() {
-    echo -e "${RED}正在卸载所有组件...${PLAIN}"
-    systemctl stop xray
-    systemctl disable xray
-    pkill -f cloudflared
-    rm -rf /usr/local/bin/xray /usr/local/etc/xray
-    rm -rf ~/.acme.sh
-    rm -f /usr/local/bin/cloudflared $CF_LOG
-    echo -e "${GREEN}清理完成。${PLAIN}"
+    echo -e "${RED}正在清理系统...${PLAIN}"
+    systemctl stop xray && pkill -f cloudflared
+    rm -rf /usr/local/etc/xray /usr/local/bin/cloudflared $CF_LOG
+    echo -e "${GREEN}卸载完成。${PLAIN}"
 }
 
-# --- 菜单循环 ---
+# 菜单循环保持不变...
 main_menu() {
     while true; do
         echo -e "
@@ -252,40 +240,19 @@ ${CYAN}==========================================
  ${YELLOW}6.${PLAIN} 卸载 Xray / 证书 / 隧道
  ${RED}0.${PLAIN} 退出脚本
 "
-        read -p "请选择操作 [0-6]: " choice
+        read -p "选择操作 [0-6]: " choice
         case $choice in
-            1) 
-               install_dependencies
-               manage_certs
-               install_vless_xhttp
-               ;;
-            2) 
-               install_cf_tunnel
-               ;;
-            3) 
-               show_node_links
-               ;;
-            4) 
-               [[ -f $XRAY_CONFIG ]] && jq . $XRAY_CONFIG || echo "无配置"
-               ;;
-            5) 
-               install_bbr
-               ;;
-            6) 
-               uninstall_all
-               ;;
-            0) 
-               echo -e "${BLUE}祝你使用愉快，再见！${PLAIN}"
-               exit 0
-               ;;
-            *) 
-               echo -e "${RED}输入错误，请重新选择！${PLAIN}"
-               ;;
+            1) install_dependencies; manage_certs; install_vless_xhttp ;;
+            2) install_cf_tunnel ;;
+            3) show_node_links ;;
+            4) [[ -f $XRAY_CONFIG ]] && jq . $XRAY_CONFIG || echo "无配置" ;;
+            5) install_bbr ;;
+            6) uninstall_all ;;
+            0) exit 0 ;;
         esac
-        echo -e "\n${BLUE}操作完成，按回车键返回菜单...${PLAIN}"
+        echo -e "\n按回车键返回菜单..."
         read -n 1
     done
 }
 
-# 启动脚本
 main_menu
