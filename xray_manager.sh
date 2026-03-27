@@ -34,21 +34,14 @@ install_base() {
     # 创建配置和证书目录
     mkdir -p /usr/local/etc/xray $CERT_DIR
 
-    # --- 核心改进：确保 Xray 服务文件存在并开启目录读取模式 ---
-    echo -e "${BLUE}[进度] 正在优化 Xray 服务启动配置...${PLAIN}"
-    
-    # 如果 Xray 尚未安装，先执行一次官方安装脚本获取 Service 文件
+# 预装 Xray 获取 Service 文件
     if [[ ! -f /etc/systemd/system/xray.service ]]; then
-        echo -e "${YELLOW}检测到 Xray 服务未安装，正在预装核心组件...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
-# 修改 Service 文件：使用 -confdir 模式，它会自动忽略目录下的子文件夹（如 certs）
-if grep -q "config.json" /etc/systemd/system/xray.service; then
-    sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' /etc/systemd/system/xray.service
-fi
 
-    # 重载 systemd 并清理可能存在的冲突 Drop-in
-    rm -rf /etc/systemd/system/xray.service.d
+    # 【关键修复】使用 -confdir 模式，完美避开 certs 文件夹冲突
+    sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' /etc/systemd/system/xray.service
+    
     systemctl daemon-reload
 }
 
