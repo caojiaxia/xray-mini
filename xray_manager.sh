@@ -34,7 +34,7 @@ install_base() {
     # 创建配置和证书目录
     mkdir -p /usr/local/etc/xray $CERT_DIR
 
-# 预装 Xray 获取 Service 文件
+    # 预装 Xray 获取 Service 文件
     if [[ ! -f /etc/systemd/system/xray.service ]]; then
         echo -e "${YELLOW}检测到 Xray 未安装，执行官方安装脚本...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -125,11 +125,6 @@ install_vless_direct() {
         echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
         return 1
     fi
-
-# --- 2. 安装 VLESS+xhttp+TLS ---
-install_vless_direct() {
-    install_base
-    # ... (前面的变量定义和证书申请逻辑保持不变) ...
 
     # 强制处理 ALPN 数组格式
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
