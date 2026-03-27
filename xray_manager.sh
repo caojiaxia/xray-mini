@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # ====================================================
-# Project: Xray xhttp & CF Tunnel 一键脚本
+# Project: Xray xhttp & CF Tunnel 独立随机化全能脚本 (全参数版)
 # Author: BoGe & User (caojiaxia)
-# System: Debian/Ubuntu/CentOS
 # ====================================================
 
 # 颜色定义
@@ -33,7 +32,7 @@ install_base() {
     mkdir -p /usr/local/etc/xray $CERT_DIR
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS ---
+# --- 2. 安装 VLESS+xhttp+TLS (全参数版) ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS ---${PLAIN}"
@@ -58,7 +57,7 @@ install_vless_direct() {
     read -p "请输入ALPN (回车随机: $r_alpn): " alpn
     alpn=${alpn:-$r_alpn}
     
-    echo -e "${BLUE}[进度] 正在准备 acme.sh 证书申请...${PLAIN}"
+    echo -e "${BLUE}[进度] 正在申请证书...${PLAIN}"
     [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$domain
     source ~/.bashrc
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
@@ -75,6 +74,10 @@ install_vless_direct() {
 
     ~/.acme.sh/acme.sh --install-cert -d $domain --key-file $CERT_DIR/server.key --fullchain-file $CERT_DIR/server.crt --reloadcmd "systemctl restart xray"
 
+    # 处理 ALPN 格式转 JSON 数组
+    local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
+
+    echo -e "${BLUE}[进度] 正在写入 Xray 核心配置...${PLAIN}"
     cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
@@ -86,7 +89,8 @@ install_vless_direct() {
             "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
             "tlsSettings": {
                 "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
-                "alpn": ["$(echo $alpn | sed 's/,/","/g')"], "fingerprint": "$fp"
+                "alpn": ["$alpn_json"],
+                "fingerprint": "$fp"
             }
         }
     }],
@@ -95,15 +99,14 @@ install_vless_direct() {
 EOF
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     systemctl enable xray && systemctl restart xray
-    echo -e "${GREEN}VLESS+xhttp+TLS 安装成功！${PLAIN}"
-    sleep 1
+    echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
     show_node_info
 }
 
 # --- 3. 安装 CF Tunnel ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 传输模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
     
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
@@ -120,6 +123,7 @@ install_cf_tunnel() {
     if [[ "$t_choice" == "2" ]]; then
         t_port=8080
         read -p "请输入 Token: " t_token
+        [[ -z "$t_token" ]] && { echo -e "${RED}Token不能为空！${PLAIN}"; return; }
     else
         read -p "回源端口 (回车随机: $r_t_port): " t_port
         t_port=${t_port:-$r_t_port}
@@ -149,23 +153,20 @@ EOF
     
     if [[ "$t_choice" == "1" ]]; then
         echo -e "${YELLOW}正在建立临时隧道...${PLAIN}"
-        # 强制使用 http2 协议并输出到日志
         nohup $CF_BIN tunnel --protocol http2 --url http://localhost:$t_port > $CF_LOG 2>&1 &
         
-        # 增强匹配逻辑
         local tmp_domain=""
         for i in {1..30}; do
-            echo -ne "\r正在抓取临时域名: ${i}s..."
+            echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
-                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | sed 's/https:\/\///')
+                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
                 if [[ -n "$tmp_domain" ]]; then
-                    echo -e "\n${GREEN}成功抓取域名: $tmp_domain${PLAIN}"
+                    echo -e "\n${GREEN}抓取成功！${PLAIN}"
                     break
                 fi
             fi
             sleep 1
         done
-        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请稍后在菜单3查看${PLAIN}"
     else
         nohup $CF_BIN tunnel --no-autoupdate run --token $t_token > $CF_LOG 2>&1 &
         echo -e "${GREEN}固定隧道已启动！${PLAIN}"
@@ -174,38 +175,42 @@ EOF
     show_node_info
 }
 
-# --- 4. 节点展示  ---
+# --- 4. 节点展示 (补全 fp 和 alpn 展示) ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 节点部署详情 ━━━━━━━━━━━━━━${PLAIN}"
     if [[ -f $XRAY_CONF_DIRECT ]]; then
         local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_DIRECT)
         local d_port=$(jq -r '.inbounds[0].port' $XRAY_CONF_DIRECT)
-        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path // .inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_DIRECT)
         local d_net=$(jq -r '.inbounds[0].streamSettings.network' $XRAY_CONF_DIRECT)
         
         echo -e "UUID: ${BLUE}$d_uuid${PLAIN}"
-        echo -e "路径: ${BLUE}$d_path${PLAIN}"
-        echo -e "回源协议: ${BLUE}$d_net${PLAIN}"
+        echo -e "协议: ${BLUE}$d_net${PLAIN}"
         
         if [[ "$d_net" == "xhttp" ]]; then
-            local domain=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
-            echo -e "${GREEN}[直连/CDN节点]${PLAIN}"
-            echo -e "链接: vless://$d_uuid@$domain:$d_port?security=tls&sni=$domain&type=xhttp&mode=auto&path=$d_path#Direct_xHTTP"
-        fi
-
-        # 隧道检测逻辑：优先通过进程判断
-        if pgrep -x "cloudflared" > /dev/null; then
-            # 尝试从日志中提取最新的 trycloudflare 域名
-            local t_url=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | tail -n 1)
+            local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
+            local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
+            local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
+            local d_alpn=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn[0]' $XRAY_CONF_DIRECT)
             
-            if [[ -n "$t_url" ]]; then
-                echo -e "${PURPLE}[临时隧道节点]${PLAIN}"
-                echo -e "域名: $t_url"
-                echo -e "链接: vless://$d_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$d_path#CF_Tunnel_WS"
-            else
-                # 如果进程在但日志没域名，判定为固定隧道
-                echo -e "${PURPLE}[固定隧道节点]${PLAIN}"
-                echo -e "提示: 正在使用 Token 模式，请在 CF 控制台查看绑定的域名接入。"
+            echo -e "路径: ${BLUE}$d_path${PLAIN}"
+            echo -e "指纹: ${BLUE}$d_fp${PLAIN}"
+            echo -e "ALPN: ${BLUE}$d_alpn${PLAIN}"
+            echo -e "${GREEN}[直连/CDN节点链接]${PLAIN}"
+            echo -e "vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path&fp=$d_fp&alpn=$(echo $d_alpn | urlencode)#Direct_xHTTP"
+        
+        elif [[ "$d_net" == "ws" ]]; then
+            local d_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_DIRECT)
+            echo -e "路径: ${BLUE}$d_path${PLAIN}"
+            
+            if pgrep -x "cloudflared" > /dev/null; then
+                local t_url=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | tail -n 1)
+                if [[ -n "$t_url" ]]; then
+                    echo -e "${PURPLE}[临时隧道节点]${PLAIN}"
+                    echo -e "链接: vless://$d_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$d_path#CF_Tunnel_WS"
+                else
+                    echo -e "${PURPLE}[固定隧道节点]${PLAIN}"
+                    echo -e "请在 CF 面板绑定域名并访问。"
+                fi
             fi
         fi
     else
@@ -214,7 +219,12 @@ show_node_info() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
 }
 
-# --- 5. 卸载与菜单  ---
+# --- 辅助：URL 编码 ---
+urlencode() {
+    python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || cat
+}
+
+# --- 5. 卸载与菜单 ---
 uninstall_all() {
     systemctl stop xray && pkill -f cloudflared
     rm -rf /usr/local/etc/xray /usr/local/bin/xray /usr/local/bin/cloudflared $CF_LOG
@@ -223,11 +233,12 @@ uninstall_all() {
 
 main_menu() {
     while true; do
-        echo -e "${CYAN}==========================================
+        echo -e "
+${CYAN}==========================================
       BoGe Xray & CF Tunnel 一键脚本
 ==========================================${PLAIN}
- ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS
- ${YELLOW}2.${PLAIN} 安装 CF Tunnel 
+ ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS (全参数)
+ ${YELLOW}2.${PLAIN} 安装 CF Tunnel (WS协议/固定+临时)
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
  ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
