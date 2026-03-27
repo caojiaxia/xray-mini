@@ -18,8 +18,9 @@ PLAIN='\033[0m'
 # 路径定义
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 CERT_DIR="/usr/local/etc/xray/certs"
+CF_LOG="/tmp/cloudflared.log"
 
-# 1. 基础环境检查与依赖安装 (非静默)
+# 1. 基础环境检查与依赖安装
 install_dependencies() {
     echo -e "${BLUE}[1/5] 正在检查并安装系统依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -32,32 +33,52 @@ install_dependencies() {
     echo -e "${GREEN}依赖安装完成。${PLAIN}"
 }
 
-# 2. 证书申请模块 (交互式+实时进度)
+# 2. 证书申请模块 (包含 Standalone 和 API 模式)
 manage_certs() {
     echo -e "${BLUE}[2/5] 开始证书管理程序...${PLAIN}"
     read -p "请输入您的解析域名: " domain
     if [[ -z "$domain" ]]; then echo -e "${RED}域名不能为空！${PLAIN}"; return 1; fi
 
-    # 安装 acme.sh
-    echo -e "${YELLOW}正在通过网络获取 acme.sh 脚本...${PLAIN}"
-    curl https://get.acme.sh | sh -s email=admin@$domain
+    echo -e "${YELLOW}正在检查 acme.sh 环境...${PLAIN}"
+    [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$domain
     source ~/.bashrc
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
-    
-    echo -e "${YELLOW}正在尝试申请 Let's Encrypt 证书 (Standalone 模式)...${PLAIN}"
-    echo -e "${YELLOW}请确保 80 端口未被占用且域名已解析。${PLAIN}"
-    
+    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+
+    echo -e "\n${CYAN}选择证书申请方式:${PLAIN}"
+    echo -e "1. Standalone 模式 (需确保 80 端口未被占用)"
+    echo -e "2. Cloudflare API 模式 (推荐，无需开放端口)"
+    read -p "请输入选择 [1-2]: " cert_method
+
     mkdir -p $CERT_DIR
-    if ~/.acme.sh/acme.sh --issue -d $domain --standalone --debug; then
-        echo -e "${GREEN}证书申请成功！正在安装到 Xray 目录...${PLAIN}"
-        ~/.acme.sh/acme.sh --install-cert -d $domain \
-            --key-file $CERT_DIR/server.key \
-            --fullchain-file $CERT_DIR/server.crt \
-            --reloadcmd "systemctl restart xray"
+
+    if [[ "$cert_method" == "2" ]]; then
+        echo -e "${YELLOW}使用 Cloudflare API 申请...${PLAIN}"
+        read -p "请输入 Cloudflare Email: " cf_email
+        read -p "请输入 Cloudflare Global API Key: " cf_key
+        export CF_Key="$cf_key"
+        export CF_Email="$cf_email"
+        
+        if ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain --debug; then
+            echo -e "${GREEN}API 模式证书申请成功！${PLAIN}"
+        else
+            echo -e "${RED}申请失败，请检查 API Key 是否正确。${PLAIN}"
+            exit 1
+        fi
     else
-        echo -e "${RED}证书申请失败，请检查防火墙设置。${PLAIN}"
-        exit 1
+        echo -e "${YELLOW}使用 Standalone 模式申请...${PLAIN}"
+        if ~/.acme.sh/acme.sh --issue -d $domain --standalone --debug; then
+            echo -e "${GREEN}Standalone 模式证书申请成功！${PLAIN}"
+        else
+            echo -e "${RED}申请失败，请确保 80 端口已放行且域名解析正确。${PLAIN}"
+            exit 1
+        fi
     fi
+
+    ~/.acme.sh/acme.sh --install-cert -d $domain \
+        --key-file $CERT_DIR/server.key \
+        --fullchain-file $CERT_DIR/server.crt \
+        --reloadcmd "systemctl restart xray"
 }
 
 # 3. 安装 Xray 并配置 xhttp
@@ -66,17 +87,16 @@ install_vless_xhttp() {
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     
     echo -e "${PURPLE}--- 开始节点参数设置 ---${PLAIN}"
-    # 参数交互
     uuid=$(cat /proc/sys/kernel/random/uuid)
     echo -e "生成随机 UUID: ${CYAN}$uuid${PLAIN}"
     
-    read -p "设置监听端口 (回车随机): " port
+    read -p "设置监听端口 (回车随机, 如需配隧道建议8080): " port
     [[ -z "$port" ]] && port=$((RANDOM % 55535 + 10000))
     
     read -p "设置 xhttp 路径 (回车随机): " path
     [[ -z "$path" ]] && path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     
-    read -p "设置伪装域名 (如 www.google.com): " sni
+    read -p "设置伪装域名 (SNI, 回车默认 www.bing.com): " sni
     [[ -z "$sni" ]] && sni="www.bing.com"
     
     echo -e "${YELLOW}正在生成 Xray 配置文件 ($XRAY_CONFIG)...${PLAIN}"
@@ -114,37 +134,56 @@ install_vless_xhttp() {
 EOF
     echo -e "${GREEN}配置文件写入成功。正在启动服务...${PLAIN}"
     systemctl enable xray && systemctl restart xray
-    echo -e "${GREEN}Xray 服务已就绪！${PLAIN}"
+    echo -e "${GREEN}Xray 服务已就绪 (端口: $port)！${PLAIN}"
 }
 
-# 4. Cloudflare Tunnel 隧道配置
+# 4. Cloudflare Tunnel 隧道配置 (新增临时隧道逻辑)
 install_cf_tunnel() {
     echo -e "${BLUE}[4/5] 正在部署 Cloudflare Tunnel...${PLAIN}"
-    
-    # 实时下载
     echo -e "${YELLOW}正在获取最新版 cloudflared 二进制...${PLAIN}"
     wget -O /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
     chmod +x /usr/local/bin/cloudflared
     
-    echo -e "${PURPLE}--- CF Tunnel 参数配置 ---${PLAIN}"
-    tunnel_uuid=$(cat /proc/sys/kernel/random/uuid)
-    tunnel_path="/tunnel-$(head /dev/urandom | tr -dc a-z0-9 | head -c 4)"
-    frontend_port=$((RANDOM % 55535 + 10000))
-    
-    echo -e "固定隧道回源端口: ${CYAN}8080${PLAIN}"
-    echo -e "前端随机连接端口: ${CYAN}$frontend_port${PLAIN}"
-    echo -e "隧道传输协议: ${CYAN}WS (WebSocket)${PLAIN}"
+    echo -e "\n${CYAN}请选择隧道类型:${PLAIN}"
+    echo -e "1. 固定隧道 (Named Tunnel, 需登录授权)"
+    echo -e "2. 临时隧道 (TryCloudflare, 自动生成域名)"
+    read -p "请输入选择 [1-2]: " tunnel_type
 
-    echo -e "\n${YELLOW}提示：固定隧道需要通过 'cloudflared tunnel login' 手动授权。${PLAIN}"
-    echo -e "${YELLOW}此脚本将准备好临时隧道运行环境...${PLAIN}"
-    
-    # 这里可根据需求扩展 systemd 托管逻辑
+    if [[ "$tunnel_type" == "2" ]]; then
+        echo -e "${YELLOW}正在启动临时隧道...${PLAIN}"
+        read -p "请输入 Xray 监听的本地端口 (默认 8080): " local_port
+        [[ -z "$local_port" ]] && local_port=8080
+        
+        # 杀掉之前的临时隧道进程
+        pkill -f cloudflared > /dev/null 2>&1
+        rm -f $CF_LOG
+        
+        # 后台运行临时隧道并记录日志
+        nohup cloudflared tunnel --url http://localhost:$local_port > $CF_LOG 2>&1 &
+        
+        echo -n "正在等待隧道分配域名..."
+        sleep 5
+        tunnel_url=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1)
+        
+        if [[ -n "$tunnel_url" ]]; then
+            echo -e "\n${GREEN}临时隧道已就绪！${PLAIN}"
+            echo -e "隧道地址: ${CYAN}$tunnel_url${PLAIN}"
+            echo -e "${YELLOW}注意: 临时隧道重启服务器后需重新运行脚本开启。${PLAIN}"
+        else
+            echo -e "\n${RED}隧道启动超时，请查看日志: $CF_LOG${PLAIN}"
+        fi
+    else
+        echo -e "${PURPLE}--- 固定隧道配置说明 ---${PLAIN}"
+        echo -e "1. 请执行 ${CYAN}cloudflared tunnel login${PLAIN} 进行授权"
+        echo -e "2. 固定隧道回源端口建议设为: ${CYAN}8080${PLAIN}"
+        echo -e "3. 前端随机端口需在 CF 控制面板手动映射。"
+    fi
 }
 
 # 5. 节点输出链接
 show_node_links() {
     if [[ ! -f $XRAY_CONFIG ]]; then
-        echo -e "${RED}错误：未发现配置文件，请先执行安装！${PLAIN}"
+        echo -e "${RED}错误：未发现配置文件！${PLAIN}"
         return
     fi
     
@@ -155,19 +194,27 @@ show_node_links() {
     local _domain=$(~/.acme.sh/acme.sh --list | awk 'NR==2 {print $1}')
 
     echo -e "\n${GREEN}========= 节点详情 (XHTTP+TLS) =========${PLAIN}"
-    echo -e "${BLUE}域名:${PLAIN} $_domain"
-    echo -e "${BLUE}端口:${PLAIN} $_port"
+    [[ -n "$_domain" ]] && echo -e "${BLUE}解析域名:${PLAIN} $_domain"
+    echo -e "${BLUE}本地端口:${PLAIN} $_port"
     echo -e "${BLUE}UUID:${PLAIN} $_uuid"
     echo -e "${BLUE}路径:${PLAIN} $_path"
     echo -e "${BLUE}ALPN:${PLAIN} h2, http/1.1"
-    echo -e "${BLUE}指纹:${PLAIN} chrome"
     echo -e "------------------------------------------"
-    echo -e "${YELLOW}VLESS 链接:${PLAIN}"
-    echo -e "${CYAN}vless://$_uuid@$_domain:$_port?security=tls&sni=$_sni&type=xhttp&mode=auto&path=${_path}#XHTTP_TLS_Node${PLAIN}"
+    
+    # 尝试显示临时隧道地址
+    if [[ -f $CF_LOG ]]; then
+        local _tmp_url=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1)
+        if [[ -n "$_tmp_url" ]]; then
+            echo -e "${BLUE}临时隧道:${PLAIN} $_tmp_url (回源端口: $_port)"
+        fi
+    fi
+    
+    echo -e "${YELLOW}VLESS 链接 (直连/API域名):${PLAIN}"
+    echo -e "${CYAN}vless://$_uuid@$_domain:$_port?security=tls&sni=$_sni&type=xhttp&mode=auto&path=${_path}#BoGe_XHTTP_TLS${PLAIN}"
     echo -e "------------------------------------------"
 }
 
-# 6. BBR 加速安装 (显示进度)
+# 6. BBR 加速安装
 install_bbr() {
     echo -e "${BLUE}正在开启 BBR 加速...${PLAIN}"
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
@@ -183,9 +230,10 @@ uninstall_all() {
     echo -e "${RED}正在卸载所有组件...${PLAIN}"
     systemctl stop xray
     systemctl disable xray
+    pkill -f cloudflared
     rm -rf /usr/local/bin/xray /usr/local/etc/xray
     rm -rf ~/.acme.sh
-    rm -f /usr/local/bin/cloudflared
+    rm -f /usr/local/bin/cloudflared $CF_LOG
     echo -e "${GREEN}清理完成。${PLAIN}"
 }
 
@@ -196,10 +244,10 @@ main_menu() {
 ${CYAN}==========================================
       BoGe Xray xhttp & CF Tunnel
 ==========================================${PLAIN}
- ${YELLOW}1.${PLAIN} 安装 VLESS + xhttp + TLS (全进度显示)
- ${YELLOW}2.${PLAIN} 配置 CF Tunnel (固定隧道+随机端口)
+ ${YELLOW}1.${PLAIN} 安装 VLESS + xhttp + TLS (含API证书)
+ ${YELLOW}2.${PLAIN} 配置 CF Tunnel (固定/临时隧道)
  ${YELLOW}3.${PLAIN} 查看节点连接信息与链接
- ${YELLOW}4.${PLAIN} 仅查看节点参数配置
+ ${YELLOW}4.${PLAIN} 仅查看节点参数配置 (JSON)
  ${YELLOW}5.${PLAIN} 开启系统 BBR 加速
  ${YELLOW}6.${PLAIN} 卸载 Xray / 证书 / 隧道
  ${RED}0.${PLAIN} 退出脚本
@@ -218,7 +266,7 @@ ${CYAN}==========================================
                show_node_links
                ;;
             4) 
-               [[ -f $XRAY_CONFIG ]] && cat $XRAY_CONFIG || echo "无配置"
+               [[ -f $XRAY_CONFIG ]] && jq . $XRAY_CONFIG || echo "无配置"
                ;;
             5) 
                install_bbr
