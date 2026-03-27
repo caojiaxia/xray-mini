@@ -45,7 +45,7 @@ enable_bbr() {
     read -p "按回车键返回..."
 }
 
-# --- 1. 基础环境安装 (仅针对 Service 和进程清理做精准修复) ---
+# --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -56,29 +56,59 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray $CERT_DIR
 
-    if [[ ! -f /etc/systemd/system/xray.service ]] && [[ ! -f /lib/systemd/system/xray.service ]]; then
-        echo -e "${YELLOW}检测到 Xray 服务未安装，正在强制拉取官方核心...${PLAIN}"
+    # 【步骤 1】：尝试官方脚本安装 
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        echo -e "${YELLOW}检测到 Xray 核心缺失，正在尝试从官方拉取...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 
-    # 【精准修复 2】：定义服务文件变量，防止 sed 找不到目标
+    # 【步骤 2】：精准定位服务文件路径
     local SERVICE_FILE="/etc/systemd/system/xray.service"
     [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
 
+    # 【步骤 3】：如果官方没生成服务文件 (NAT 常现)，则手动创建兜底配置
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
+        cat <<EOF > /etc/systemd/system/xray.service
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls/xray-core
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -confdir /usr/local/etc/xray/
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        SERVICE_FILE="/etc/systemd/system/xray.service"
+    fi
+
+    # 【步骤 4】：修正服务配置 
     if [[ -f "$SERVICE_FILE" ]]; then
-        echo -e "${BLUE}[进度] 正在修正服务配置: $SERVICE_FILE${PLAIN}"
+        echo -e "${BLUE}[进度] 正在修正服务运行参数...${PLAIN}"
         systemctl stop xray >/dev/null 2>&1
         pkill -9 xray >/dev/null 2>&1
         
-        # 使用变量路径进行 sed 修改
+        # 即使文件是手动创建的，运行这两行 sed 也没有副作用
         sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
         sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
         
+        # 清理可能存在的冲突目录和默认配置
         rm -rf "${SERVICE_FILE}.d"
         rm -f /usr/local/etc/xray/config.json
         systemctl daemon-reload
+        echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
     else
-        echo -e "${RED}[致命错误] 无法找到 Xray 服务文件，安装可能已中断。${PLAIN}"
+        echo -e "${RED}[致命错误] 无法定位 Xray 二进制文件或服务文件，安装失败。${PLAIN}"
         return 1
     fi
 }
