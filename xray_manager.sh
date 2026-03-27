@@ -283,14 +283,14 @@ install_cf_tunnel() {
 EOF
     systemctl restart xray
 
-    # 【修正点 3】：下载与权限
+    # 下载与权限
     if [[ ! -f $CF_BIN ]]; then
         echo -e "${YELLOW}正在下载 cloudflared...${PLAIN}"
         wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x $CF_BIN
     fi
 
-    # 【修正点 4】：改用 Systemd 守护进程运行 cloudflared
+    # Systemd 守护进程运行 cloudflared
     echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
     systemctl stop cloudflared >/dev/null 2>&1
     pkill -f cloudflared >/dev/null 2>&1
@@ -378,39 +378,46 @@ show_node_info() {
     read -p "按回车键返回菜单..."
 }
 
-# --- 5. 彻底卸载---
+# --- 5. 彻底卸载  ---
 uninstall_all() {
-    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray 服务 ！！！${PLAIN}"
+    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray/Cloudflared 服务 ！！！${PLAIN}"
     read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
     [[ "$confirm" != "y" ]] && return
 
     echo -e "${YELLOW}[1/5] 正在停止相关服务与进程...${PLAIN}"
-    systemctl stop xray >/dev/null 2>&1
+    # 同时停止 xray 和 cloudflared 服务
+    systemctl stop xray cloudflared >/dev/null 2>&1
+    # 强力杀死所有残留进程
     pkill -9 xray >/dev/null 2>&1
+    pkill -9 cloudflared >/dev/null 2>&1
     pkill -f cloudflared >/dev/null 2>&1
 
     echo -e "${YELLOW}[2/5] 正在移除 Systemd 服务定义...${PLAIN}"
-    systemctl disable xray >/dev/null 2>&1
+    # 禁用服务并删除 NAT 模式下的 cloudflared.service
+    systemctl disable xray cloudflared >/dev/null 2>&1
     rm -f /etc/systemd/system/xray.service
+    rm -f /etc/systemd/system/cloudflared.service
     systemctl daemon-reload
 
     echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
     # 彻底删除整个 xray 目录（含所有 json 和 certs）
     rm -rf /usr/local/etc/xray
+    rm -rf $CERT_DIR
     # 删除可执行二进制文件
     rm -f /usr/local/bin/xray
     rm -f /usr/local/bin/cloudflared
+    rm -f $CF_BIN
 
     echo -e "${YELLOW}[4/5] 正在清理临时文件与日志...${PLAIN}"
     rm -f /tmp/cloudflared.log
     rm -f /tmp/cf_tunnel_domain
-    # 可选：清理 acme.sh 证书脚本（如果不想要了可以去掉下面两行的注释）
+    rm -f $CF_LOG
+    # 清理 acme.sh 证书相关 (根据你的需求选择性保留)
     # rm -rf ~/.acme.sh
-    # sed -i '/acme.sh/d' ~/.bashrc
 
-    echo -e "${YELLOW}[5/5] 正在清理残留依赖...${PLAIN}"
-    # 仅清理脚本生成的 cron 任务（如果存在）
-    crontab -l | grep -v "acme.sh" | crontab - >/dev/null 2>&1
+    echo -e "${YELLOW}[5/5] 正在清理残留依赖与任务...${PLAIN}"
+    # 清理相关的 cron 任务
+    crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - >/dev/null 2>&1
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
