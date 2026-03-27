@@ -37,9 +37,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 ### ⚠️ 注意事项
 
-    - NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取 trycloudflare.com 域名。
+**NAT小机如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
 
-    - API 模式：申请证书前请确保 Cloudflare API Key、Email 及域名已准备就绪。
+    - NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取 `trycloudflare.com`域名。
+
+    - API 模式：申请证书前请确保 `Cloudflare API Key`、`Email`及域名已准备就绪。
 
     - 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。
 
