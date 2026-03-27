@@ -22,7 +22,7 @@ CERT_DIR="/usr/local/etc/xray/certs"
 CF_LOG="/tmp/cloudflared.log"
 CF_BIN="/usr/local/bin/cloudflared"
 
-# --- 1. 基础环境安装 ---
+# --- 1. 基础环境安装  ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -36,12 +36,23 @@ install_base() {
 
 # 预装 Xray 获取 Service 文件
     if [[ ! -f /etc/systemd/system/xray.service ]]; then
+        echo -e "${YELLOW}检测到 Xray 未安装，执行官方安装脚本...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 
-    # 【关键修复】使用 -confdir 模式，完美避开 certs 文件夹冲突
+    # --- 脚本层面修复：修改 Service 文件 ---
+    echo -e "${BLUE}[进度] 正在修正 Systemd 服务配置...${PLAIN}"
+    
+    # 修复 1: 改为 -confdir 模式，避免加载 certs 文件夹导致崩溃
     sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' /etc/systemd/system/xray.service
     
+    # 修复 2: 将 User=nobody 改为 User=root，解决证书读取权限问题
+    sed -i 's/User=nobody/User=root/g' /etc/systemd/system/xray.service
+
+    # 修复 3: 清理可能存在的旧冲突
+    rm -rf /etc/systemd/system/xray.service.d
+    rm -f /usr/local/etc/xray/config.json
+
     systemctl daemon-reload
 }
 
@@ -115,7 +126,12 @@ install_vless_direct() {
         return 1
     fi
 
-    # 处理 ALPN 格式 (转为 Xray 识别的 JSON 数组)
+# --- 2. 安装 VLESS+xhttp+TLS ---
+install_vless_direct() {
+    install_base
+    # ... (前面的变量定义和证书申请逻辑保持不变) ...
+
+    # 强制处理 ALPN 数组格式
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
@@ -151,16 +167,16 @@ install_vless_direct() {
 }
 EOF
 
-    # 重启并验证
+    # 显式清理旧进程并重启
+    pkill -f xray
     systemctl restart xray
+    
     sleep 2
     if systemctl is-active --quiet xray; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
-        echo -e "${CYAN}提示：若需开启 CDN，请在 Cloudflare 将小云朵点亮，并确保 SSL/TLS 设置为 Full (Strict)。${PLAIN}"
         show_node_info
     else
-        echo -e "${RED}[错误] Xray 服务启动失败！可能是端口冲突或配置错误。${PLAIN}"
-        echo -e "请执行: journalctl -u xray -n 30 查看原因。"
+        echo -e "${RED}[错误] Xray 启动失败，请检查端口 $port 是否被占用。${PLAIN}"
     fi
 }
 
