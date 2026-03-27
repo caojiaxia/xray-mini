@@ -36,7 +36,10 @@ install_base() {
 # --- 2. 安装 VLESS+xhttp+TLS  ---
 install_vless_direct() {
     install_base
-    echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS ---${PLAIN}"
+    echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
+    
+    # --- DNS 守护逻辑：防止 acme.sh 篡改 DNS 导致失败 ---
+    echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
     
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
@@ -46,17 +49,21 @@ install_vless_direct() {
 
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
-    read -p "请输入UUID (回车随机: $uuid): " uuid; uuid=${uuid:-$r_uuid}
-    read -p "请输入端口 (回车随机: $port): " port; port=${port:-$r_port}
-    read -p "请输入路径 (回车随机: $path): " path; path=${path:-$r_path}
-    read -p "请输入指纹fp (回车随机: $fp): " fp; fp=${fp:-$r_fp}
-    read -p "请输入ALPN (回车随机: $alpn): " alpn; alpn=${alpn:-$r_alpn}
+    
+    # 提醒用户 CDN 端口限制
+    echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
+    read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
+    
+    read -p "请输入UUID (回车随机: $r_uuid): " uuid; uuid=${uuid:-$r_uuid}
+    read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
+    read -p "请输入指纹fp (回车随机: $r_fp): " fp; fp=${fp:-$r_fp}
+    read -p "请输入ALPN (回车随机: $r_alpn): " alpn; alpn=${alpn:-$r_alpn}
     
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    # 预装 Xray 保证 systemctl 环境
-    echo -e "${BLUE}[进度] 正在检查 Xray 环境...${PLAIN}"
+    # 预装 Xray 保证环境
+    echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
 
@@ -65,51 +72,64 @@ install_vless_direct() {
     source ~/.bashrc
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    # 执行申请逻辑，但不直接根据返回码报错
+    # --- 证书申请逻辑 ---
     if [[ "$c_mode" == "2" ]]; then
-        read -p "CF Email: " cf_e && read -p "CF Key: " cf_k
-        export CF_Key="$cf_k" && export CF_Email="$cf_e"
-        ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain
+        read -p "请输入 CF Email: " cf_e
+        read -p "请输入 CF Global API Key: " cf_k
+        export CF_Key="$cf_k"
+        export CF_Email="$cf_e"
+        # 使用 --force 确保在已有证书情况下也能重新跑通逻辑
+        ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain --force
     else
-        # 申请前检查 80 端口，如果已有证书则不检查端口
+        # Standalone 模式检查 80 端口
         if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
             if lsof -i:80 > /dev/null 2>&1; then
-                echo -e "${RED}[错误] 80 端口被占用，请停止 Docker 后再试！${PLAIN}"
+                echo -e "${RED}[错误] 80 端口被占用，请停止 Docker/Nginx 后再试！${PLAIN}"
                 return 1
             fi
         fi
-        ~/.acme.sh/acme.sh --issue -d $domain --standalone
+        ~/.acme.sh/acme.sh --issue -d $domain --standalone --force
     fi
 
-    # --- 核心改进：实地检查证书是否存在，不再死抠返回码 ---
+    # --- 证书存在性实地检查 ---
     if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
-        echo -e "${GREEN}[成功] 检测到有效证书，准备部署...${PLAIN}"
-        
-        # 强制拷贝到 Xray 目录
+        echo -e "${GREEN}[成功] 证书就绪，正在同步至 Xray 目录...${PLAIN}"
         mkdir -p $CERT_DIR
         cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
         cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
         chmod 644 $CERT_DIR/server.key $CERT_DIR/server.crt
     else
-        echo -e "${RED}[致命错误] 无法获取证书文件，请检查解析或 80 端口占用。${PLAIN}"
+        echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
         return 1
     fi
 
-    # 处理 ALPN
+    # 处理 ALPN 格式 (转为 Xray 识别的 JSON 数组)
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
 
-    echo -e "${BLUE}[进度] 正在写入 Xray 核心配置...${PLAIN}"
+    echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
     cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
-        "port": $port, "protocol": "vless",
-        "settings": { "clients": [{"id": "$uuid"}], "decryption": "none" },
+        "port": $port, 
+        "protocol": "vless",
+        "settings": { 
+            "clients": [{"id": "$uuid"}], 
+            "decryption": "none" 
+        },
         "streamSettings": {
-            "network": "xhttp", "security": "tls",
-            "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
+            "network": "xhttp", 
+            "security": "tls",
+            "xhttpSettings": { 
+                "path": "$path", 
+                "mode": "auto", 
+                "host": "$domain" 
+            },
             "tlsSettings": {
-                "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
+                "certificates": [{ 
+                    "certificateFile": "$CERT_DIR/server.crt", 
+                    "keyFile": "$CERT_DIR/server.key" 
+                }],
                 "alpn": ["$alpn_json"],
                 "fingerprint": "$fp"
             }
@@ -119,15 +139,16 @@ install_vless_direct() {
 }
 EOF
 
-    systemctl enable xray && systemctl restart xray
-    
-    # 最后检查服务是否真起来了
+    # 重启并验证
+    systemctl restart xray
     sleep 2
     if systemctl is-active --quiet xray; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
+        echo -e "${CYAN}提示：若需开启 CDN，请在 Cloudflare 将小云朵点亮，并确保 SSL/TLS 设置为 Full (Strict)。${PLAIN}"
         show_node_info
     else
-        echo -e "${RED}[错误] Xray 服务启动失败，请运行 'journalctl -u xray -n 30' 查看详情。${PLAIN}"
+        echo -e "${RED}[错误] Xray 服务启动失败！可能是端口冲突或配置错误。${PLAIN}"
+        echo -e "请执行: journalctl -u xray -n 30 查看原因。"
     fi
 }
 # --- 3. 安装 CF Tunnel ---
