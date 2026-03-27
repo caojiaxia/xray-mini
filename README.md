@@ -35,3 +35,25 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 <img width="1155" alt="image" src="https://user-images.githubusercontent.com/92626977/218253971-60f11bbf-9de9-4082-9e46-12cd2aad79a1.png">
 
 
+### ⚠️ 注意事项
+
+    - NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取 trycloudflare.com 域名。
+
+    - API 模式：申请证书前请确保 Cloudflare API Key、Email 及域名已准备就绪。
+
+    - 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。
+
+**📁 目录结构**
+
+    - /usr/local/etc/xray/：核心配置文件存放地
+
+    - /usr/local/bin/：Xray 与 cloudflared 二进制程序
+
+    - /tmp/cloudflared.log：隧道运行实时日志
+
+**🤝 贡献与反馈**
+
+如果你在使用过程中发现 Bug 或有更好的功能建议，欢迎提交 Issue 或 Pull Request。
+
+|  Star it if you like! ⭐   |
+|------------------------------  ｜
