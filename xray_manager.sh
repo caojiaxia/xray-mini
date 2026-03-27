@@ -326,11 +326,44 @@ urlencode() {
     python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || cat
 }
 
-# --- 5. 卸载与菜单 ---
+# --- 5. 卸载脚本及相关组件 ---
 uninstall_all() {
-    systemctl stop xray && pkill -f cloudflared
-    rm -rf /usr/local/etc/xray /usr/local/bin/xray /usr/local/bin/cloudflared $CF_LOG
-    echo -e "卸载完成"
+    echo -e "${RED}确定要卸载所有组件吗？此操作不可逆！${PLAIN}"
+    read -p "确认请输入 [y/n]: " confirm
+    [[ "$confirm" != "y" ]] && return
+
+    echo -e "${YELLOW}[1/5] 正在停止并卸载 Xray 服务...${PLAIN}"
+    systemctl stop xray >/dev/null 2>&1
+    systemctl disable xray >/dev/null 2>&1
+    rm -f /etc/systemd/system/xray.service
+    rm -rf /etc/systemd/system/xray.service.d
+    rm -f /usr/local/bin/xray
+    
+    echo -e "${YELLOW}[2/5] 正在清理配置文件和证书...${PLAIN}"
+    # 清理整个配置目录，包括直连和隧道配置
+    rm -rf /usr/local/etc/xray
+    # 清理证书存储目录
+    [[ -n "$CERT_DIR" ]] && rm -rf "$CERT_DIR"
+    
+    echo -e "${YELLOW}[3/5] 正在卸载 Cloudflare Tunnel...${PLAIN}"
+    pkill -f cloudflared >/dev/null 2>&1
+    rm -f /usr/local/bin/cloudflared
+    rm -f /tmp/cf_tunnel.log
+    rm -f /tmp/cf_tunnel_domain
+    
+    echo -e "${YELLOW}[4/5] 正在清理 ACME 证书工具...${PLAIN}"
+    if [[ -d ~/.acme.sh ]]; then
+        ~/.acme.sh/acme.sh --uninstall >/dev/null 2>&1
+        rm -rf ~/.acme.sh
+    fi
+
+    echo -e "${YELLOW}[5/5] 正在重载系统服务...${PLAIN}"
+    systemctl daemon-reload
+    
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}  卸载完成！所有配置、证书及程序已清除。${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    read -p "按回车键返回菜单..."
 }
 
 main_menu() {
