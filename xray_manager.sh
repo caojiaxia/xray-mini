@@ -6,7 +6,7 @@
 # System: Debian/Ubuntu/CentOS
 # ====================================================
 
-# 颜色定义
+# 颜色和路径定义 (保持不变)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -15,12 +15,39 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# 路径
-XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
-XRAY_CONF_TUNNEL="/usr/local/etc/xray/conf_2_tunnel.json"
-CERT_DIR="/usr/local/etc/xray/certs"
-CF_LOG="/tmp/cloudflared.log"
+XRAY_CONF_DIR="/usr/local/etc/xray"
+XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
+XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
+CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
+CF_LOG="/tmp/cloudflared.log"
+
+# --- [模块 4: BBR 加速] ---
+enable_bbr() {
+    echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
+    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+        echo -e "${GREEN}[提示] BBR 已经处于开启状态，无需重复操作。${PLAIN}"
+    else
+        echo -e "${YELLOW}正在写入 BBR 配置...${PLAIN}"
+        # 优化：先清理旧的配置再写入，防止重复叠加
+        sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+        sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+        
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+        
+        sysctl -p > /dev/null 2>&1
+        
+        if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+            echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+            echo -e "${GREEN}  BBR 加速已成功开启！内核已切换为 FQ+BBR${PLAIN}"
+            echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+        else
+            echo -e "${RED}[错误] BBR 开启失败，请检查内核版本是否高于 4.9${PLAIN}"
+        fi
+    fi
+    read -p "按回车键返回..."
+}
 
 # --- 1. 基础环境安装 ---
 install_base() {
