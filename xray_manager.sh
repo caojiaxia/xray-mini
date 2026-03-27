@@ -178,18 +178,12 @@ install_vless_direct() {
 
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
-echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先模式)...${PLAIN}"
-    cat <<EOF > $XRAY_CONF_DIRECT
+    echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
+# ... 之前的 read -p "请输入自定义节点名称..." 保持不变 ...
+
+cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
-    "dns": {
-        "servers": [
-            "https+local://1.1.1.1/dns-query",
-            "localhost"
-        ],
-        "queryStrategy": "UseIPv6",
-        "tag": "dns_inbound"
-    },
     "inbounds": [{
         "listen": "0.0.0.0",
         "port": $port, 
@@ -217,29 +211,7 @@ echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先模式)...${PLAIN}
             }
         }
     }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "UseIPv6"
-            },
-            "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "block"
-        }
-    ],
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-            {
-                "type": "field",
-                "outboundTag": "direct",
-                "network": "udp,tcp"
-            }
-        ]
-    }
+    "outbounds": [{"protocol": "freedom"}]
 }
 EOF
 
@@ -287,17 +259,10 @@ install_cf_tunnel() {
         read -p "回源端口 (回车随机: $r_t_port): " t_port
         t_port=${t_port:-$r_t_port}
     fi
-cat <<EOF > $XRAY_CONF_TUNNEL
+
+    cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
-    "dns": {
-        "servers": [
-            "https+local://1.1.1.1/dns-query",
-            "localhost"
-        ],
-        "queryStrategy": "UseIPv6",
-        "tag": "dns_inbound"
-    },
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": $t_port, 
@@ -313,29 +278,7 @@ cat <<EOF > $XRAY_CONF_TUNNEL
             "wsSettings": { "path": "$t_path" }
         }
     }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "UseIPv6"
-            },
-            "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "block"
-        }
-    ],
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-            {
-                "type": "field",
-                "outboundTag": "direct",
-                "network": "udp,tcp"
-            }
-        ]
-    }
+    "outbounds": [{"protocol": "freedom", "tag": "tunnel_out"}]
 }
 EOF
     systemctl restart xray
