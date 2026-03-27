@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # ====================================================
-# Project: Xray xhttp & CF Tunnel 独立随机化全能脚本 (全参数版)
+# Project: Xray xhttp & CF Tunnel 一键脚本
 # Author: BoGe & User (caojiaxia)
+# System: Debian/Ubuntu/CentOS
 # ====================================================
 
 # 颜色定义
@@ -32,7 +33,7 @@ install_base() {
     mkdir -p /usr/local/etc/xray $CERT_DIR
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS (全参数版) ---
+# --- 2. 安装 VLESS+xhttp+TLS  ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS ---${PLAIN}"
@@ -237,8 +238,8 @@ main_menu() {
 ${CYAN}==========================================
       BoGe Xray & CF Tunnel 一键脚本
 ==========================================${PLAIN}
- ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS (全参数)
- ${YELLOW}2.${PLAIN} 安装 CF Tunnel (WS协议/固定+临时)
+ ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS
+ ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
  ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
