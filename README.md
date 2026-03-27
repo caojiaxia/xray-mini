@@ -55,7 +55,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 如果你在使用过程中发现 Bug 或有更好的功能建议，欢迎提交 Issue 或 Pull Request。
 
-|------------------------------  ｜
-|  Star it if you like! ⭐   |
-|------------------------------  ｜
+---
+
+Star it if you like! ⭐
+
+---
 
