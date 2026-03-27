@@ -175,7 +175,7 @@ cat <<EOF > $XRAY_CONF_DIRECT
     }],
     "outbounds": [{"protocol": "freedom", "tag": "direct_out"}]
 }
-EOFF
+EOF
 
     pkill -f xray
     systemctl restart xray
@@ -224,7 +224,7 @@ install_cf_tunnel() {
     "log": { "loglevel": "warning" },
     "inbounds": [{
         "listen": "127.0.0.1",
-        "port": $port, 
+        "port": $t_port, 
         "protocol": "vless",
         "tag": "tunnel_inbound",
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
