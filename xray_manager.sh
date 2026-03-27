@@ -56,27 +56,31 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray $CERT_DIR
 
-    if [[ ! -f /etc/systemd/system/xray.service ]]; then
-        echo -e "${YELLOW}检测到 Xray 未安装，执行官方安装脚本...${PLAIN}"
+    if [[ ! -f /etc/systemd/system/xray.service ]] && [[ ! -f /lib/systemd/system/xray.service ]]; then
+        echo -e "${YELLOW}检测到 Xray 服务未安装，正在强制拉取官方核心...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 
-    echo -e "${BLUE}[进度] 正在修正 Systemd 服务配置...${PLAIN}"
-    
-    # 【1】: 修改前彻底杀死旧进程，防止端口锁死
-    systemctl stop xray >/dev/null 2>&1
-    pkill -9 xray >/dev/null 2>&1
+    # 【精准修复 2】：定义服务文件变量，防止 sed 找不到目标
+    local SERVICE_FILE="/etc/systemd/system/xray.service"
+    [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
 
-    # 【2】: 改为 -confdir 模式 (保留你原始的 sed 逻辑)
-    sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' /etc/systemd/system/xray.service
-    # 【3】: User=root (保留你原始的 sed 逻辑)
-    sed -i 's/User=nobody/User=root/g' /etc/systemd/system/xray.service
-
-    # 【4】: 删掉会引起冲突的默认配置文件
-    rm -rf /etc/systemd/system/xray.service.d
-    rm -f /usr/local/etc/xray/config.json
-
-    systemctl daemon-reload
+    if [[ -f "$SERVICE_FILE" ]]; then
+        echo -e "${BLUE}[进度] 正在修正服务配置: $SERVICE_FILE${PLAIN}"
+        systemctl stop xray >/dev/null 2>&1
+        pkill -9 xray >/dev/null 2>&1
+        
+        # 使用变量路径进行 sed 修改
+        sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
+        sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+        
+        rm -rf "${SERVICE_FILE}.d"
+        rm -f /usr/local/etc/xray/config.json
+        systemctl daemon-reload
+    else
+        echo -e "${RED}[致命错误] 无法找到 Xray 服务文件，安装可能已中断。${PLAIN}"
+        return 1
+    fi
 }
 
 # --- 2. 安装 VLESS+xhttp+TLS (严格遵循你提供的流程) ---
