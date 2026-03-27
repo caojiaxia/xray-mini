@@ -151,7 +151,8 @@ EOF
         echo -e "请执行: journalctl -u xray -n 30 查看原因。"
     fi
 }
-# --- 3. 安装 CF Tunnel ---
+
+# --- 3. 安装 CF Tunnel 
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -168,15 +169,22 @@ install_cf_tunnel() {
     read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
     t_path=${t_path:-$r_t_path}
 
+    local t_domain=""
     if [[ "$t_choice" == "2" ]]; then
         t_port=8080
+        read -p "请输入 Cloudflare 绑定的域名 (如 tunnel.example.com): " t_domain
+        [[ -z "$t_domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
         read -p "请输入 Token: " t_token
         [[ -z "$t_token" ]] && { echo -e "${RED}Token不能为空！${PLAIN}"; return; }
+        
+        # 将域名存入临时文件供展示函数读取
+        echo "$t_domain" > /tmp/cf_tunnel_domain
     else
         read -p "回源端口 (回车随机: $r_t_port): " t_port
         t_port=${t_port:-$r_t_port}
     fi
 
+    # 写入配置 (固定为 WS 协议以适配隧道)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -194,6 +202,7 @@ EOF
     mv $XRAY_CONF_TUNNEL $XRAY_CONF_DIRECT
     systemctl restart xray
 
+    # 下载 Cloudflared
     [[ ! -f $CF_BIN ]] && wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x $CF_BIN
 
     pkill -f cloudflared > /dev/null 2>&1
@@ -203,13 +212,13 @@ EOF
         echo -e "${YELLOW}正在建立临时隧道...${PLAIN}"
         nohup $CF_BIN tunnel --protocol http2 --url http://localhost:$t_port > $CF_LOG 2>&1 &
         
-        local tmp_domain=""
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
                 tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
                 if [[ -n "$tmp_domain" ]]; then
-                    echo -e "\n${GREEN}抓取成功！${PLAIN}"
+                    echo -e "\n${GREEN}抓取成功！域名: $tmp_domain${PLAIN}"
+                    echo "$tmp_domain" > /tmp/cf_tunnel_domain
                     break
                 fi
             fi
@@ -223,7 +232,6 @@ EOF
     show_node_info
 }
 
-# --- 4. 节点展示 (补全 fp 和 alpn 展示) ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 节点部署详情 ━━━━━━━━━━━━━━${PLAIN}"
     if [[ -f $XRAY_CONF_DIRECT ]]; then
@@ -235,34 +243,31 @@ show_node_info() {
         echo -e "协议: ${BLUE}$d_net${PLAIN}"
         
         if [[ "$d_net" == "xhttp" ]]; then
+            # ... (保持原有的 xhttp 展示逻辑) ...
             local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
             local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
             local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
             local d_alpn=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn[0]' $XRAY_CONF_DIRECT)
-            
-            echo -e "路径: ${BLUE}$d_path${PLAIN}"
-            echo -e "指纹: ${BLUE}$d_fp${PLAIN}"
-            echo -e "ALPN: ${BLUE}$d_alpn${PLAIN}"
-            echo -e "${GREEN}[直连/CDN节点链接]${PLAIN}"
-            echo -e "vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path&fp=$d_fp&alpn=$(echo $d_alpn | urlencode)#Direct_xHTTP"
-        
+            echo -e "链接: vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path&fp=$d_fp&alpn=$(echo $d_alpn | urlencode)#Direct_xHTTP"
+
         elif [[ "$d_net" == "ws" ]]; then
             local d_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_DIRECT)
             echo -e "路径: ${BLUE}$d_path${PLAIN}"
             
-            if pgrep -x "cloudflared" > /dev/null; then
-                local t_url=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | tail -n 1)
-                if [[ -n "$t_url" ]]; then
-                    echo -e "${PURPLE}[临时隧道节点]${PLAIN}"
-                    echo -e "链接: vless://$d_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$d_path#CF_Tunnel_WS"
-                else
-                    echo -e "${PURPLE}[固定隧道节点]${PLAIN}"
-                    echo -e "请在 CF 面板绑定域名并访问。"
-                fi
+            # 尝试获取存储的隧道域名
+            local t_url=""
+            if [[ -f /tmp/cf_tunnel_domain ]]; then
+                t_url=$(cat /tmp/cf_tunnel_domain)
+            fi
+
+            if [[ -n "$t_url" ]]; then
+                echo -e "${PURPLE}[Cloudflare 隧道节点]${PLAIN}"
+                # 隧道节点固定 443 端口，TLS 开启
+                echo -e "链接: vless://$d_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$d_path#CF_Tunnel_WS"
+            else
+                echo -e "${RED}无法获取隧道域名，请检查 cloudflared 日志或手动输入。${PLAIN}"
             fi
         fi
-    else
-        echo -e "${RED}未发现配置${PLAIN}"
     fi
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
 }
