@@ -126,7 +126,7 @@ install_vless_direct() {
     fi
 
     # 处理 ALPN 格式 (转为 Xray 识别的 JSON 数组)
-    local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
+    local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
     cat <<EOF > /usr/local/etc/xray/conf_1_direct.json
@@ -152,7 +152,7 @@ install_vless_direct() {
                     "certificateFile": "$CERT_DIR/server.crt", 
                     "keyFile": "$CERT_DIR/server.key" 
                 }],
-                "alpn": ["$alpn_json"],
+                "alpn": ["$alpn_formatted"],
                 "fingerprint": "$fp"
             }
         }
