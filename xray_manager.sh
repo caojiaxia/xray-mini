@@ -33,11 +33,12 @@ install_base() {
     mkdir -p /usr/local/etc/xray $CERT_DIR
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS ---
+# --- 2. 安装 VLESS+xhttp+TLS (逻辑重组版) ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS ---${PLAIN}"
     
+    # 基础参数获取
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
     local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
@@ -46,7 +47,6 @@ install_vless_direct() {
 
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
-
     read -p "请输入UUID (回车随机: $r_uuid): " uuid
     uuid=${uuid:-$r_uuid}
     read -p "请输入端口 (回车随机: $r_port): " port
@@ -58,16 +58,23 @@ install_vless_direct() {
     read -p "请输入ALPN (回车随机: $r_alpn): " alpn
     alpn=${alpn:-$r_alpn}
     
-    # 证书模式选择 (提前到端口检测之前)
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    # --- 1: 80 端口预检 (针对 Standalone) ---
+    # 核心修复点 1: 先安装 Xray 内核和服务文件，防止 systemctl 找不到服务
+    echo -e "${BLUE}[进度] 正在预装 Xray 核心组件...${PLAIN}"
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    fi
+    # 清理可能存在的冲突 Drop-in 配置
+    rm -rf /etc/systemd/system/xray.service.d
+    systemctl daemon-reload
+
+    # 核心修复点 2: 端口检测
     if [[ "$c_mode" == "1" ]]; then
         if lsof -i:80 > /dev/null 2>&1 || netstat -tulpn | grep -q ":80 "; then
-            echo -e "${RED}[错误] 80 端口被占用，Standalone 验证将无法进行！${PLAIN}"
-            echo -e "${YELLOW}请先运行 'docker stop \$(docker ps -q)' 停止占用 80 端口的容器后再试。${PLAIN}"
-            return 1 # 直接退出函数，不向下执行
+            echo -e "${RED}[错误] 80 端口被占用，请先停止 Docker/Nginx！${PLAIN}"
+            return 1
         fi
     fi
     
@@ -85,22 +92,24 @@ install_vless_direct() {
         ~/.acme.sh/acme.sh --issue -d $domain --standalone
     fi
 
-    # --- 2: 证书申请结果严格校验 ---
     if [[ $? -ne 0 ]]; then
-        echo -e "${RED}[致命错误] 证书申请失败！请检查上方报错。${PLAIN}"
-        echo -e "${RED}脚本已强制停止，未写入任何 Xray 配置，请检查网络或域名解析后再试。${PLAIN}"
-        return 1 # 严格中断
-    fi
-
-    # 执行安装
-    ~/.acme.sh/acme.sh --install-cert -d $domain --key-file $CERT_DIR/server.key --fullchain-file $CERT_DIR/server.crt --reloadcmd "systemctl restart xray"
-    
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}[致命错误] 证书安装失败！请确认权限或路径是否正确。${PLAIN}"
+        echo -e "${RED}[致命错误] 证书申请失败！${PLAIN}"
         return 1
     fi
 
-    # 只有证书成功，才会执行下面的写入操作
+    # 执行安装 (此时 systemctl restart xray 就不会报错了)
+    ~/.acme.sh/acme.sh --install-cert -d $domain \
+        --key-file $CERT_DIR/server.key \
+        --fullchain-file $CERT_DIR/server.crt \
+        --reloadcmd "systemctl restart xray"
+    
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}[致命错误] 证书安装失败！正在尝试强制跳过 reload 报错...${PLAIN}"
+        # 如果只是因为没启动报错，强制拷贝一次
+        cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
+        cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
+    fi
+
     # 处理 ALPN 格式转 JSON 数组
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
 
@@ -109,10 +118,12 @@ install_vless_direct() {
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
-        "port": $port, "protocol": "vless",
+        "port": $port, 
+        "protocol": "vless",
         "settings": { "clients": [{"id": "$uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "xhttp", "security": "tls",
+            "network": "xhttp", 
+            "security": "tls",
             "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
             "tlsSettings": {
                 "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
@@ -125,7 +136,6 @@ install_vless_direct() {
 }
 EOF
 
-    [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     systemctl enable xray && systemctl restart xray
     echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
     show_node_info
