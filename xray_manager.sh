@@ -16,13 +16,13 @@ CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
 # 路径
-XRAY_CONF_DIRECT="/usr/local/etc/xray/config.json"
-XRAY_CONF_TUNNEL="/usr/local/etc/xray/tunnel_config.json"
+XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
+XRAY_CONF_TUNNEL="/usr/local/etc/xray/conf_2_tunnel.json"
 CERT_DIR="/usr/local/etc/xray/certs"
 CF_LOG="/tmp/cloudflared.log"
 CF_BIN="/usr/local/bin/cloudflared"
 
-# --- 1. 基础环境安装  ---
+# --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -56,7 +56,7 @@ install_base() {
     systemctl daemon-reload
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS  ---
+# --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
@@ -101,7 +101,6 @@ install_vless_direct() {
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
-        # 使用 --force 确保在已有证书情况下也能重新跑通逻辑
         ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain --force
     else
         # Standalone 模式检查 80 端口
@@ -130,7 +129,7 @@ install_vless_direct() {
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
-    cat <<EOF > /usr/local/etc/xray/conf_1_direct.json
+    cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -175,7 +174,7 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel 
+# --- 3. 安装 CF Tunnel ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -208,7 +207,7 @@ install_cf_tunnel() {
     fi
 
     # 写入配置 (固定为 WS 协议以适配隧道)
-    cat <<EOF > /usr/local/etc/xray/conf_2_tunnel.json
+    cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -222,7 +221,7 @@ install_cf_tunnel() {
     "outbounds": [{"protocol": "freedom"}]
 }
 EOF
-    mv $XRAY_CONF_TUNNEL $XRAY_CONF_DIRECT
+    # 修复：删除错误的 mv 指令，保持多配置共存
     systemctl restart xray
 
     # 下载 Cloudflared
@@ -255,15 +254,15 @@ EOF
     show_node_info
 }
 
-# --- 3. 查看当前节点信息与链接 ---
+# --- 4. 查看当前节点信息与链接 ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
     local has_node=false
 
     # --- 1. 检查并展示：VLESS+xhttp+TLS 直连/CDN 节点 ---
-    if [[ -f "/usr/local/etc/xray/conf_1_direct.json" ]]; then
+    if [[ -f "$XRAY_CONF_DIRECT" ]]; then
         has_node=true
-        local conf="/usr/local/etc/xray/conf_1_direct.json"
+        local conf="$XRAY_CONF_DIRECT"
         
         # 使用 jq 解析配置参数
         local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
@@ -273,7 +272,7 @@ show_node_info() {
         local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $conf)
         local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $conf)
         
-        # URL 编码处理 ALPN (防止特殊字符破坏链接)
+        # URL 编码处理 ALPN
         local d_alpn=$(echo $d_alpn_raw | sed 's/,/%2C/g')
 
         echo -e "${GREEN}[节点 1: VLESS+xhttp+TLS 直连/CDN]${PLAIN}"
@@ -286,14 +285,13 @@ show_node_info() {
     fi
 
     # --- 2. 检查并展示：CF Tunnel 隧道节点 ---
-    if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
+    if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
         has_node=true
-        local conf="/usr/local/etc/xray/conf_2_tunnel.json"
+        local conf="$XRAY_CONF_TUNNEL"
         
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
         local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $conf)
         
-        # 优先读取之前安装时保存的域名文件
         local t_url=""
         if [[ -f "/tmp/cf_tunnel_domain" ]]; then
             t_url=$(cat /tmp/cf_tunnel_domain)
@@ -308,23 +306,17 @@ show_node_info() {
         else
             echo -e "  UUID: ${BLUE}$t_uuid${PLAIN}"
             echo -e "  路径: ${BLUE}$t_path${PLAIN}"
-            echo -e "  ${RED}提示: 无法获取隧道域名，请确认 Cloudflare 面板已绑定。${PLAIN}"
+            echo -e "  ${RED}提示: 无法获取隧道域名。${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
 
-    # --- 3. 如果没有任何节点 ---
     if [ "$has_node" = false ]; then
         echo -e "${YELLOW}当前服务器未检测到任何已部署的 Xray 节点。${PLAIN}"
     fi
 
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
     read -p "按回车键返回菜单..."
-}
-
-# --- 辅助：URL 编码 ---
-urlencode() {
-    python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || cat
 }
 
 # --- 5. 卸载脚本及相关组件 ---
@@ -341,10 +333,7 @@ uninstall_all() {
     rm -f /usr/local/bin/xray
     
     echo -e "${YELLOW}[2/5] 正在清理配置文件和证书...${PLAIN}"
-    # 清理整个配置目录，包括直连和隧道配置
     rm -rf /usr/local/etc/xray
-    # 清理证书存储目录
-    [[ -n "$CERT_DIR" ]] && rm -rf "$CERT_DIR"
     
     echo -e "${YELLOW}[3/5] 正在卸载 Cloudflare Tunnel...${PLAIN}"
     pkill -f cloudflared >/dev/null 2>&1
@@ -361,9 +350,7 @@ uninstall_all() {
     echo -e "${YELLOW}[5/5] 正在重载系统服务...${PLAIN}"
     systemctl daemon-reload
     
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN}  卸载完成！所有配置、证书及程序已清除。${PLAIN}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}卸载完成！${PLAIN}"
     read -p "按回车键返回菜单..."
 }
 
@@ -388,9 +375,8 @@ ${CYAN}==========================================
             5) uninstall_all ;;
             0) exit 0 ;;
         esac
-        echo -ne "\n按回车键返回菜单..."
-        read -n 1
     done
 }
 
+# 核心修复：在这里调用函数
 main_menu
