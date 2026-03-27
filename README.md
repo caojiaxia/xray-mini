@@ -1,4 +1,4 @@
-### 🚀 Xray-Tunnel-Pro: 极致全能部署脚本
+### 🚀 Xray-mini: 极致全能部署脚本
 
 Xray-Tunnel-Pro 是一款专为 NAT VPS 及普通服务器设计的自动化部署脚本。它通过 Systemd 守护进程解决了隧道频繁掉线的痛点，并支持最新的 VLESS + xHTTP 协议，实现极致的隐蔽性与稳定性。
 ### ✨ 核心特性
