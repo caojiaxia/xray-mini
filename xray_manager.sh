@@ -232,6 +232,7 @@ install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
     
+    # 生成默认值
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_t_port=$((RANDOM % 55535 + 10000))
@@ -266,9 +267,11 @@ install_cf_tunnel() {
         "listen": "127.0.0.1",
         "port": $t_port, 
         "protocol": "vless",
-        "tag": "$t_node_name",   
-        "tag": "tunnel_inbound",
-        "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
+        "tag": "$t_node_name",
+        "settings": { 
+            "clients": [{"id": "$t_uuid"}], 
+            "decryption": "none" 
+        },
         "streamSettings": {
             "network": "ws", 
             "security": "none",
@@ -280,14 +283,50 @@ install_cf_tunnel() {
 EOF
     systemctl restart xray
 
-    [[ ! -f $CF_BIN ]] && wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x $CF_BIN
+    # 【修正点 3】：下载与权限
+    if [[ ! -f $CF_BIN ]]; then
+        echo -e "${YELLOW}正在下载 cloudflared...${PLAIN}"
+        wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x $CF_BIN
+    fi
 
-    pkill -f cloudflared > /dev/null 2>&1
+    # 【修正点 4】：改用 Systemd 守护进程运行 cloudflared
+    echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
+    systemctl stop cloudflared >/dev/null 2>&1
+    pkill -f cloudflared >/dev/null 2>&1
     rm -f $CF_LOG
-    
+
+    local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        echo -e "${YELLOW}正在建立临时隧道...${PLAIN}"
-        nohup $CF_BIN tunnel --protocol http2 --url http://localhost:$t_port > $CF_LOG 2>&1 &
+        cf_cmd="tunnel --protocol http2 --url http://localhost:$t_port"
+    else
+        cf_cmd="tunnel --no-autoupdate run --token $t_token"
+    fi
+
+    cat <<EOF > /etc/systemd/system/cloudflared.service
+[Unit]
+Description=Cloudflare Tunnel Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$CF_BIN $cf_cmd
+Restart=always
+RestartSec=5
+StandardOutput=file:$CF_LOG
+StandardError=file:$CF_LOG
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable cloudflared
+    systemctl start cloudflared
+
+    if [[ "$t_choice" == "1" ]]; then
+        echo -e "${YELLOW}正在尝试抓取临时域名 (最长等待 30s)...${PLAIN}"
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
@@ -300,11 +339,12 @@ EOF
             fi
             sleep 1
         done
+        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请检查日志: $CF_LOG${PLAIN}"
     else
-        nohup $CF_BIN tunnel --no-autoupdate run --token $t_token > $CF_LOG 2>&1 &
-        echo -e "${GREEN}固定隧道已启动！${PLAIN}"
+        echo -e "${GREEN}固定隧道已通过服务形式启动！${PLAIN}"
         sleep 2
     fi
+    
     show_node_info
 }
 
