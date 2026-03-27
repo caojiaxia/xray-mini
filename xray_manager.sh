@@ -42,13 +42,10 @@ install_base() {
         echo -e "${YELLOW}检测到 Xray 服务未安装，正在预装核心组件...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
-
-    # 修改 Service 文件：将读取单个 config.json 改为读取整个目录
-    # 这样 /usr/local/etc/xray/ 下所有的 .json 文件都会被同时加载
-    if grep -q "config.json" /etc/systemd/system/xray.service; then
-        sed -i 's|/usr/local/etc/xray/config.json|/usr/local/etc/xray/|g' /etc/systemd/system/xray.service
-        echo -e "${GREEN}[成功] 已开启多配置文件支持模式。${PLAIN}"
-    fi
+# 修改 Service 文件：使用 -confdir 模式，它会自动忽略目录下的子文件夹（如 certs）
+if grep -q "config.json" /etc/systemd/system/xray.service; then
+    sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' /etc/systemd/system/xray.service
+fi
 
     # 重载 systemd 并清理可能存在的冲突 Drop-in
     rm -rf /etc/systemd/system/xray.service.d
