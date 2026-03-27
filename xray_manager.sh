@@ -184,6 +184,14 @@ install_vless_direct() {
 cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
+    "dns": {
+        "servers": [
+            "https+local://1.1.1.1/dns-query",
+            "localhost"
+        ],
+        "queryStrategy": "UseIPv6",
+        "tag": "dns_inbound"
+    },
     "inbounds": [{
         "listen": "0.0.0.0",
         "port": $port, 
@@ -211,7 +219,29 @@ cat <<EOF > $XRAY_CONF_DIRECT
             }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv6"
+            },
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ],
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "outboundTag": "direct",
+                "network": "udp,tcp"
+            }
+        ]
+    }
 }
 EOF
 
@@ -259,10 +289,17 @@ install_cf_tunnel() {
         read -p "回源端口 (回车随机: $r_t_port): " t_port
         t_port=${t_port:-$r_t_port}
     fi
-
-    cat <<EOF > $XRAY_CONF_TUNNEL
+cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
+    "dns": {
+        "servers": [
+            "https+local://1.1.1.1/dns-query",
+            "localhost"
+        ],
+        "queryStrategy": "UseIPv6",
+        "tag": "dns_inbound"
+    },
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": $t_port, 
@@ -278,7 +315,29 @@ install_cf_tunnel() {
             "wsSettings": { "path": "$t_path" }
         }
     }],
-    "outbounds": [{"protocol": "freedom", "tag": "tunnel_out"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv6"
+            },
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ],
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "outboundTag": "direct",
+                "network": "udp,tcp"
+            }
+        ]
+    }
 }
 EOF
     systemctl restart xray
