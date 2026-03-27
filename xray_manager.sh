@@ -26,11 +26,33 @@ CF_BIN="/usr/local/bin/cloudflared"
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
-        apt update && apt install -y curl wget jq socat cron openssl tar
+        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools
     else
-        yum install -y curl wget jq socat crontabs openssl tar
+        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools
     fi
+    
+    # 创建配置和证书目录
     mkdir -p /usr/local/etc/xray $CERT_DIR
+
+    # --- 核心改进：确保 Xray 服务文件存在并开启目录读取模式 ---
+    echo -e "${BLUE}[进度] 正在优化 Xray 服务启动配置...${PLAIN}"
+    
+    # 如果 Xray 尚未安装，先执行一次官方安装脚本获取 Service 文件
+    if [[ ! -f /etc/systemd/system/xray.service ]]; then
+        echo -e "${YELLOW}检测到 Xray 服务未安装，正在预装核心组件...${PLAIN}"
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    fi
+
+    # 修改 Service 文件：将读取单个 config.json 改为读取整个目录
+    # 这样 /usr/local/etc/xray/ 下所有的 .json 文件都会被同时加载
+    if grep -q "config.json" /etc/systemd/system/xray.service; then
+        sed -i 's|/usr/local/etc/xray/config.json|/usr/local/etc/xray/|g' /etc/systemd/system/xray.service
+        echo -e "${GREEN}[成功] 已开启多配置文件支持模式。${PLAIN}"
+    fi
+
+    # 重载 systemd 并清理可能存在的冲突 Drop-in
+    rm -rf /etc/systemd/system/xray.service.d
+    systemctl daemon-reload
 }
 
 # --- 2. 安装 VLESS+xhttp+TLS  ---
@@ -107,7 +129,7 @@ install_vless_direct() {
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
-    cat <<EOF > $XRAY_CONF_DIRECT
+    cat <<EOF > /usr/local/etc/xray/conf_1_direct.json
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -185,7 +207,7 @@ install_cf_tunnel() {
     fi
 
     # 写入配置 (固定为 WS 协议以适配隧道)
-    cat <<EOF > $XRAY_CONF_TUNNEL
+    cat <<EOF > /usr/local/etc/xray/conf_2_tunnel.json
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -232,44 +254,71 @@ EOF
     show_node_info
 }
 
+# --- 3. 查看当前节点信息与链接 ---
 show_node_info() {
-    echo -e "\n${CYAN}━━━━━━━━━━━━━━ 节点部署详情 ━━━━━━━━━━━━━━${PLAIN}"
-    if [[ -f $XRAY_CONF_DIRECT ]]; then
-        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_DIRECT)
-        local d_port=$(jq -r '.inbounds[0].port' $XRAY_CONF_DIRECT)
-        local d_net=$(jq -r '.inbounds[0].streamSettings.network' $XRAY_CONF_DIRECT)
-        
-        echo -e "UUID: ${BLUE}$d_uuid${PLAIN}"
-        echo -e "协议: ${BLUE}$d_net${PLAIN}"
-        
-        if [[ "$d_net" == "xhttp" ]]; then
-            # ... (保持原有的 xhttp 展示逻辑) ...
-            local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
-            local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
-            local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
-            local d_alpn=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn[0]' $XRAY_CONF_DIRECT)
-            echo -e "链接: vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path&fp=$d_fp&alpn=$(echo $d_alpn | urlencode)#Direct_xHTTP"
+    echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
+    local has_node=false
 
-        elif [[ "$d_net" == "ws" ]]; then
-            local d_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_DIRECT)
-            echo -e "路径: ${BLUE}$d_path${PLAIN}"
-            
-            # 尝试获取存储的隧道域名
-            local t_url=""
-            if [[ -f /tmp/cf_tunnel_domain ]]; then
-                t_url=$(cat /tmp/cf_tunnel_domain)
-            fi
+    # --- 1. 检查并展示：VLESS+xhttp+TLS 直连/CDN 节点 ---
+    if [[ -f "/usr/local/etc/xray/conf_1_direct.json" ]]; then
+        has_node=true
+        local conf="/usr/local/etc/xray/conf_1_direct.json"
+        
+        # 使用 jq 解析配置参数
+        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
+        local d_port=$(jq -r '.inbounds[0].port' $conf)
+        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $conf)
+        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $conf)
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $conf)
+        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $conf)
+        
+        # URL 编码处理 ALPN (防止特殊字符破坏链接)
+        local d_alpn=$(echo $d_alpn_raw | sed 's/,/%2C/g')
 
-            if [[ -n "$t_url" ]]; then
-                echo -e "${PURPLE}[Cloudflare 隧道节点]${PLAIN}"
-                # 隧道节点固定 443 端口，TLS 开启
-                echo -e "链接: vless://$d_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$d_path#CF_Tunnel_WS"
-            else
-                echo -e "${RED}无法获取隧道域名，请检查 cloudflared 日志或手动输入。${PLAIN}"
-            fi
-        fi
+        echo -e "${GREEN}[节点 1: VLESS+xhttp+TLS 直连/CDN]${PLAIN}"
+        echo -e "  地址/SNI: ${BLUE}$d_host${PLAIN}"
+        echo -e "  端口: ${BLUE}$d_port${PLAIN}"
+        echo -e "  UUID: ${BLUE}$d_uuid${PLAIN}"
+        echo -e "  路径: ${BLUE}$d_path${PLAIN}"
+        echo -e "  链接: ${YELLOW}vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$(echo $d_path | sed 's/\//%2F/g')&fp=$d_fp&alpn=$d_alpn#Direct_xHTTP${PLAIN}"
+        echo -e "------------------------------------------------"
     fi
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
+
+    # --- 2. 检查并展示：CF Tunnel 隧道节点 ---
+    if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
+        has_node=true
+        local conf="/usr/local/etc/xray/conf_2_tunnel.json"
+        
+        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
+        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $conf)
+        
+        # 优先读取之前安装时保存的域名文件
+        local t_url=""
+        if [[ -f "/tmp/cf_tunnel_domain" ]]; then
+            t_url=$(cat /tmp/cf_tunnel_domain)
+        fi
+
+        echo -e "${PURPLE}[节点 2: Cloudflare Tunnel 隧道]${PLAIN}"
+        if [[ -n "$t_url" ]]; then
+            echo -e "  隧道域名: ${BLUE}$t_url${PLAIN}"
+            echo -e "  UUID: ${BLUE}$t_uuid${PLAIN}"
+            echo -e "  路径: ${BLUE}$t_path${PLAIN}"
+            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')#CF_Tunnel_WS${PLAIN}"
+        else
+            echo -e "  UUID: ${BLUE}$t_uuid${PLAIN}"
+            echo -e "  路径: ${BLUE}$t_path${PLAIN}"
+            echo -e "  ${RED}提示: 无法获取隧道域名，请确认 Cloudflare 面板已绑定。${PLAIN}"
+        fi
+        echo -e "------------------------------------------------"
+    fi
+
+    # --- 3. 如果没有任何节点 ---
+    if [ "$has_node" = false ]; then
+        echo -e "${YELLOW}当前服务器未检测到任何已部署的 Xray 节点。${PLAIN}"
+    fi
+
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
+    read -p "按回车键返回菜单..."
 }
 
 # --- 辅助：URL 编码 ---
