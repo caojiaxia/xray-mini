@@ -377,7 +377,6 @@ show_node_info() {
     fi
     read -p "按回车键返回菜单..."
 }
-
 # --- 5. 彻底卸载  ---
 uninstall_all() {
     echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray/Cloudflared 服务 ！！！${PLAIN}"
@@ -385,25 +384,22 @@ uninstall_all() {
     [[ "$confirm" != "y" ]] && return
 
     echo -e "${YELLOW}[1/5] 正在停止相关服务与进程...${PLAIN}"
-    # 同时停止 xray 和 cloudflared 服务
+    # 停止服务
     systemctl stop xray cloudflared >/dev/null 2>&1
-    # 强力杀死所有残留进程
+    # 强力杀除残留进程
     pkill -9 xray >/dev/null 2>&1
     pkill -9 cloudflared >/dev/null 2>&1
     pkill -f cloudflared >/dev/null 2>&1
 
     echo -e "${YELLOW}[2/5] 正在移除 Systemd 服务定义...${PLAIN}"
-    # 禁用服务并删除 NAT 模式下的 cloudflared.service
     systemctl disable xray cloudflared >/dev/null 2>&1
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/systemd/system/cloudflared.service
     systemctl daemon-reload
 
     echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
-    # 彻底删除整个 xray 目录（含所有 json 和 certs）
     rm -rf /usr/local/etc/xray
     rm -rf $CERT_DIR
-    # 删除可执行二进制文件
     rm -f /usr/local/bin/xray
     rm -f /usr/local/bin/cloudflared
     rm -f $CF_BIN
@@ -412,12 +408,22 @@ uninstall_all() {
     rm -f /tmp/cloudflared.log
     rm -f /tmp/cf_tunnel_domain
     rm -f $CF_LOG
-    # 清理 acme.sh 证书相关 (根据你的需求选择性保留)
-    # rm -rf ~/.acme.sh
+    # 彻底清理 acme.sh 文件夹 (如需保留请注释掉下一行)
+    rm -rf ~/.acme.sh
 
-    echo -e "${YELLOW}[5/5] 正在清理残留依赖与任务...${PLAIN}"
-    # 清理相关的 cron 任务
-    crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - >/dev/null 2>&1
+    echo -e "${YELLOW}[5/5] 正在清理残留依赖与守护任务...${PLAIN}"
+    
+    # 清理自动守护脚本文件
+    rm -f /usr/local/bin/xray_keep_alive.sh
+    
+    # 一次性清理 crontab 中的所有相关任务 (acme 和 守护脚本)
+    # 使用 egrep 过滤多个关键词
+    crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh" | crontab - >/dev/null 2>&1
+
+    # 清理 ~/.bashrc 中的 acme.sh 环境变量
+    if [[ -f ~/.bashrc ]]; then
+        sed -i '/acme.sh/d' ~/.bashrc
+    fi
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
@@ -425,31 +431,59 @@ uninstall_all() {
     read -p "按回车键返回菜单..."
 }
 
-# --- [主菜单模块] (严格遵循你要求的横排/纵向样式) ---
+# --- [主菜单模块]  ---
 main_menu() {
     while true; do
         clear
         echo -e "
 ${CYAN}==========================================
-      BoGe Xray & CF Tunnel 一键脚本
+     BoGe Xray & CF Tunnel 一键脚本
 ==========================================${PLAIN}
  ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
  ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
+ ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
  ${RED}0.${PLAIN} 退出脚本"
-        read -p "选择 [0-5]: " choice
+        read -p "选择 [0-6]: " choice
         case $choice in
             1) install_vless_direct ;;
             2) install_cf_tunnel ;;
             3) show_node_info ;;
             4) enable_bbr ;; 
             5) uninstall_all ;;
+            6) setup_cron_job ;;  # 这里对应我们刚才讨论的守护函数
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
     done
+}
+
+# --- 自动守护任务设置 ---
+setup_cron_job() {
+    echo -e "${YELLOW}正在配置自动维护任务 (每分钟检查一次)...${PLAIN}"
+    
+    # 创建守护脚本
+    cat <<EOF > /usr/local/bin/xray_keep_alive.sh
+#!/bin/bash
+# 检查 Xray
+if ! systemctl is-active --quiet xray; then
+    systemctl restart xray
+fi
+# 检查 Cloudflare Tunnel (如果是隧道模式)
+if systemctl list-unit-files | grep -q cloudflared.service; then
+    if ! systemctl is-active --quiet cloudflared; then
+        systemctl restart cloudflared
+    fi
+fi
+EOF
+    chmod +x /usr/local/bin/xray_keep_alive.sh
+
+    # 写入 Crontab (先清理旧的，再添加新的)
+    (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
+    
+    echo -e "${GREEN}自动守护已开启：每分钟自动检测并拉起掉线服务。${PLAIN}"
 }
 
 main_menu
