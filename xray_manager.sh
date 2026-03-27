@@ -143,12 +143,14 @@ install_vless_direct() {
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
-    cat <<EOF > $XRAY_CONF_DIRECT
+cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
+        "listen": "0.0.0.0",
         "port": $port, 
         "protocol": "vless",
+        "tag": "direct_inbound",
         "settings": { 
             "clients": [{"id": "$uuid"}], 
             "decryption": "none" 
@@ -171,9 +173,9 @@ install_vless_direct() {
             }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [{"protocol": "freedom", "tag": "direct_out"}]
 }
-EOF
+EOFF
 
     pkill -f xray
     systemctl restart xray
@@ -221,14 +223,18 @@ install_cf_tunnel() {
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
-        "port": $t_port, "protocol": "vless",
+        "listen": "127.0.0.1",
+        "port": $port, 
+        "protocol": "vless",
+        "tag": "tunnel_inbound",
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "ws", "security": "none",
+            "network": "ws", 
+            "security": "none",
             "wsSettings": { "path": "$t_path" }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [{"protocol": "freedom", "tag": "tunnel_out"}]
 }
 EOF
     systemctl restart xray
