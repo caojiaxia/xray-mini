@@ -33,7 +33,7 @@ install_base() {
     mkdir -p /usr/local/etc/xray $CERT_DIR
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS  ---
+# --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS ---${PLAIN}"
@@ -58,13 +58,25 @@ install_vless_direct() {
     read -p "请输入ALPN (回车随机: $r_alpn): " alpn
     alpn=${alpn:-$r_alpn}
     
-    echo -e "${BLUE}[进度] 正在申请证书...${PLAIN}"
+    # 证书模式选择 (提前到端口检测之前)
+    echo -e "选择模式: 1.Standalone 2.Cloudflare API"
+    read -p "选择 [1-2]: " c_mode
+
+    # --- 1: 80 端口预检 (针对 Standalone) ---
+    if [[ "$c_mode" == "1" ]]; then
+        if lsof -i:80 > /dev/null 2>&1 || netstat -tulpn | grep -q ":80 "; then
+            echo -e "${RED}[错误] 80 端口被占用，Standalone 验证将无法进行！${PLAIN}"
+            echo -e "${YELLOW}请先运行 'docker stop \$(docker ps -q)' 停止占用 80 端口的容器后再试。${PLAIN}"
+            return 1 # 直接退出函数，不向下执行
+        fi
+    fi
+    
+    echo -e "${BLUE}[进度] 正在准备申请证书...${PLAIN}"
     [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$domain
     source ~/.bashrc
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    echo -e "选择模式: 1.Standalone 2.Cloudflare API"
-    read -p "选择 [1-2]: " c_mode
+    # 执行申请
     if [[ "$c_mode" == "2" ]]; then
         read -p "CF Email: " cf_e && read -p "CF Key: " cf_k
         export CF_Key="$cf_k" && export CF_Email="$cf_e"
@@ -73,8 +85,22 @@ install_vless_direct() {
         ~/.acme.sh/acme.sh --issue -d $domain --standalone
     fi
 
-    ~/.acme.sh/acme.sh --install-cert -d $domain --key-file $CERT_DIR/server.key --fullchain-file $CERT_DIR/server.crt --reloadcmd "systemctl restart xray"
+    # --- 2: 证书申请结果严格校验 ---
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}[致命错误] 证书申请失败！请检查上方报错。${PLAIN}"
+        echo -e "${RED}脚本已强制停止，未写入任何 Xray 配置，请检查网络或域名解析后再试。${PLAIN}"
+        return 1 # 严格中断
+    fi
 
+    # 执行安装
+    ~/.acme.sh/acme.sh --install-cert -d $domain --key-file $CERT_DIR/server.key --fullchain-file $CERT_DIR/server.crt --reloadcmd "systemctl restart xray"
+    
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}[致命错误] 证书安装失败！请确认权限或路径是否正确。${PLAIN}"
+        return 1
+    fi
+
+    # 只有证书成功，才会执行下面的写入操作
     # 处理 ALPN 格式转 JSON 数组
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
 
@@ -98,12 +124,12 @@ install_vless_direct() {
     "outbounds": [{"protocol": "freedom"}]
 }
 EOF
+
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     systemctl enable xray && systemctl restart xray
     echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
     show_node_info
 }
-
 # --- 3. 安装 CF Tunnel ---
 install_cf_tunnel() {
     install_base
