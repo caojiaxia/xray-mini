@@ -100,6 +100,8 @@ install_vless_direct() {
     read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
     read -p "请输入指纹fp (回车随机: $r_fp): " fp; fp=${fp:-$r_fp}
     read -p "请输入ALPN (回车随机: $r_alpn): " alpn; alpn=${alpn:-$r_alpn}
+    read -p "请输入自定义节点名称 (默认: Direct_xHTTP): " node_name
+    node_name=${node_name:-"Direct_xHTTP"}    
     
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
@@ -203,6 +205,8 @@ install_cf_tunnel() {
     
     read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
     t_uuid=${t_uuid:-$r_t_uuid}
+    read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
+    t_node_name=${t_node_name:-"CF_Tunnel"}
     read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
     t_path=${t_path:-$r_t_path}
 
@@ -270,31 +274,27 @@ EOF
 # --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
-    local has_node=false
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
-        has_node=true
-        local conf="$XRAY_CONF_DIRECT"
-        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
-        local d_port=$(jq -r '.inbounds[0].port' $conf)
-        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $conf)
-        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $conf)
-        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $conf)
-        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $conf)
+        local d_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_DIRECT)
+        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_DIRECT)
+        local d_port=$(jq -r '.inbounds[0].port' $XRAY_CONF_DIRECT)
+        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
+        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
+        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $XRAY_CONF_DIRECT)
         local d_alpn=$(echo $d_alpn_raw | sed 's/,/%2C/g')
-        echo -e "${GREEN}[节点 1: VLESS+xhttp+TLS 直连/CDN]${PLAIN}"
-        echo -e "  链接: ${YELLOW}vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$(echo $d_path | sed 's/\//%2F/g')&fp=$d_fp&alpn=$d_alpn#Direct_xHTTP${PLAIN}"
+        echo -e "${GREEN}[节点: $d_name]${PLAIN}"
+        echo -e "  链接: ${YELLOW}vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$(echo $d_path | sed 's/\//%2F/g')&fp=$d_fp&alpn=$d_alpn#$d_name${PLAIN}"
         echo -e "------------------------------------------------"
     fi
-
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
-        has_node=true
-        local conf="$XRAY_CONF_TUNNEL"
-        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $conf)
-        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $conf)
+        local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
+        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
+        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
-        echo -e "${PURPLE}[节点 2: Cloudflare Tunnel 隧道]${PLAIN}"
+        echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
-            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')#CF_Tunnel_WS${PLAIN}"
+            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')#$t_name${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
