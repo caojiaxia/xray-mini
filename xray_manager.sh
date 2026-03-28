@@ -6,7 +6,7 @@
 # System: Debian/Ubuntu/CentOS
 # ====================================================
 
-# 颜色和路径定义 (严格保持不变)
+# 颜色和路径定义 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -113,7 +113,7 @@ EOF
     fi
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS (严格遵循你提供的流程) ---
+# --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
@@ -453,7 +453,7 @@ ${CYAN}==========================================
             3) show_node_info ;;
             4) enable_bbr ;; 
             5) uninstall_all ;;
-            6) setup_cron_job ;;  # 这里对应我们刚才讨论的守护函数
+            6) setup_cron_job ;;  # 这里对应守护函数
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
