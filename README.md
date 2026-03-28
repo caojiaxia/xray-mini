@@ -49,11 +49,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 **📁 目录结构**
 
-    - /usr/local/etc/xray/：核心配置文件存放地
+- /usr/local/etc/xray/：核心配置文件存放地
 
-    - /usr/local/bin/：Xray 与 cloudflared 二进制程序
+- /usr/local/bin/：Xray 与 cloudflared 二进制程序
 
-    - /tmp/cloudflared.log：隧道运行实时日志
+- /tmp/cloudflared.log：隧道运行实时日志
 
 **🤝 贡献与反馈**
 
