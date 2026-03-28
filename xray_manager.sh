@@ -397,7 +397,7 @@ update_cf_tunnel_protocol() {
     else
         echo -e "${RED}[错误] 未找到 cloudflared 服务文件，请先安装隧道。${PLAIN}"
     fi
-    sleep 2
+    read -p "优化完成，按回车键返回菜单..."
 }
 
 # --- 5. 查看当前节点信息与链接  ---
