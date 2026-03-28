@@ -205,16 +205,22 @@ install_vless_direct() {
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
 
     echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
-    [[ ! -f ~/.acme.sh/acme.sh ]] && curl https://get.acme.sh | sh -s email=admin@$domain
-    source ~/.bashrc
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+    # --- 集成修正部分：确保 acme.sh 安装与路径绝对化 ---
+    if [[ ! -f ~/.acme.sh/acme.sh ]]; then
+        curl https://get.acme.sh | sh -s email=admin@$domain
+    fi
+    
+    # 定义绝对路径变量，避免 source ~/.bashrc 失败导致后续报错
+    local ACME_BIN="$HOME/.acme.sh/acme.sh"
+    $ACME_BIN --set-default-ca --server letsencrypt
+    # ------------------------------------------------
 
     if [[ "$c_mode" == "2" ]]; then
         read -p "请输入 CF Email: " cf_e
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
-        ~/.acme.sh/acme.sh --issue --dns dns_cf -d $domain --force
+        $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
         if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
             if lsof -i:80 > /dev/null 2>&1; then
@@ -222,7 +228,7 @@ install_vless_direct() {
                 return 1
             fi
         fi
-        ~/.acme.sh/acme.sh --issue -d $domain --standalone --force
+        $ACME_BIN --issue -d $domain --standalone --force
     fi
 
     if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
@@ -496,6 +502,7 @@ uninstall_all() {
     rm -f /tmp/cloudflared.log
     rm -f /tmp/cf_tunnel_domain
     rm -f $CF_LOG
+    rm -f /var/log/xray_keep_alive.log
     # 彻底清理 acme.sh 文件夹 (如需保留请注释掉下一行)
     rm -rf ~/.acme.sh
 
