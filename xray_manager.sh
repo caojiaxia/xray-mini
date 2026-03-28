@@ -176,11 +176,12 @@ install_vless_direct() {
         return 1
     fi
 
+    # 处理变量格式化
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
-    echo -e "${BLUE}[进度] 正在写入核心配置 (兼容 CDN 模式)...${PLAIN}"
-# ... 之前的 read -p "请输入自定义节点名称..." 保持不变 ...
+    echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
 
+# 核心配置写入
 cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
@@ -206,28 +207,40 @@ cat <<EOF > $XRAY_CONF_DIRECT
                     "certificateFile": "$CERT_DIR/server.crt", 
                     "keyFile": "$CERT_DIR/server.key" 
                 }],
-                "alpn": ["h2","http/1.1"],
-                "fingerprint": "chrome"
+                "alpn": ["$alpn_formatted"],
+                "fingerprint": "$fp"
             }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv6"
+            }
+        }
+    ]
 }
 EOF
 
-    pkill -f xray
-    systemctl restart xray
+    # 强力重启逻辑
+    systemctl stop xray >/dev/null 2>&1
+    pkill -9 xray >/dev/null 2>&1
+    sleep 1
+    systemctl start xray
     
     sleep 2
     if systemctl is-active --quiet xray; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
         show_node_info
     else
-        echo -e "${RED}[错误] Xray 启动失败，请检查端口 $port 是否被占用。${PLAIN}"
+        echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
+        echo -e "${YELLOW}正在进行配置诊断...${PLAIN}"
+        /usr/local/bin/xray -test -config $XRAY_CONF_DIRECT
     fi
 }
 
-# --- 3. 安装 CF Tunnel  ---
+# --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -260,6 +273,7 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
+    # 写入 Xray 配置 (集成 IPv6 优先出站策略，不带 DNS 模块以防报错)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -278,7 +292,15 @@ install_cf_tunnel() {
             "wsSettings": { "path": "$t_path" }
         }
     }],
-    "outbounds": [{"protocol": "freedom", "tag": "tunnel_out"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv6"
+            },
+            "tag": "tunnel_out"
+        }
+    ]
 }
 EOF
     systemctl restart xray
@@ -293,13 +315,15 @@ EOF
     # Systemd 守护进程运行 cloudflared
     echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
     systemctl stop cloudflared >/dev/null 2>&1
-    pkill -f cloudflared >/dev/null 2>&1
+    pkill -9 cloudflared >/dev/null 2>&1
     rm -f $CF_LOG
 
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
+        # 临时隧道直接在启动命令中加入 --protocol http2
         cf_cmd="tunnel --protocol http2 --url http://localhost:$t_port"
     else
+        # 固定隧道使用 token 运行
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
@@ -341,10 +365,14 @@ EOF
         done
         [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请检查日志: $CF_LOG${PLAIN}"
     else
-        echo -e "${GREEN}固定隧道已通过服务形式启动！${PLAIN}"
-        sleep 2
+        echo -e "${GREEN}固定隧道服务已启动，正在执行 HTTP2 协议优化...${PLAIN}"
+        # 针对固定隧道，调用协议优化函数
+        update_cf_tunnel_protocol
+        sleep 1
     fi
     
+    echo -e "${BLUE}所有组件已就绪，正在生成节点信息...${PLAIN}"
+    sleep 2
     show_node_info
 }
 
