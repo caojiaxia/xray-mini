@@ -22,6 +22,66 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
+# --- 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
+update_cf_tunnel_protocol() {
+    SERVICE_FILE="/etc/systemd/system/cloudflared.service"
+    
+    if [ -f "$SERVICE_FILE" ]; then
+        echo -e "${YELLOW}检测到 Systemd 服务，正在优化传输协议...${PLAIN}"
+        
+        # 1. 如果已经有协议参数了，先删掉旧的（防止重复堆积参数）
+        sed -i 's/--protocol [^ ]*//g' "$SERVICE_FILE"
+        
+        # 2. 在 tunnel run 后面精准插入 --protocol http2
+        sed -i 's/tunnel run/tunnel run --protocol http2/' "$SERVICE_FILE"
+        
+        # 3. 重载并重启
+        systemctl daemon-reload
+        systemctl restart cloudflared
+        
+        echo -e "${GREEN}协议已强制切换至 HTTP2 并重启服务。${PLAIN}"
+    else
+        echo -e "${RED}[错误] 未找到 cloudflared 服务文件，请先安装隧道。${PLAIN}"
+    fi
+    read -p "优化完成，按回车键返回菜单..."
+}
+
+# ---  自动清理日志与系统垃圾 ---
+cleanup_logs() {
+    echo -e "${YELLOW}正在执行系统瘦身与日志清理...${PLAIN}"
+    
+    # 1. 清空 Xray 和 Cloudflared 的日志文件内容（真正的清零，不保留换行符）
+    [[ -f /var/log/xray/access.log ]] && : > /var/log/xray/access.log
+    [[ -f /var/log/xray/error.log ]] && : > /var/log/xray/error.log
+    [[ -f /tmp/cloudflared.log ]] && : > /tmp/cloudflared.log
+    [[ -f "$CF_LOG" ]] && : > "$CF_LOG"
+    
+    # 2. 清理系统日志 (journalctl) 只保留最近 1 天
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl --vacuum-time=1d >/dev/null 2>&1
+    fi
+
+    # 3. 清理包管理器缓存 (适配 Debian/Ubuntu/CentOS)
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get autoremove -y >/dev/null 2>&1
+        apt-get clean >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum autoremove -y >/dev/null 2>&1
+        yum clean all >/dev/null 2>&1
+    fi
+
+    # 4. 设置定时任务：每周一凌晨 3 点自动清理一次
+    # 使用 readlink 动态获取当前脚本的绝对路径，避免硬编码导致任务失效
+    local current_script=$(readlink -f "$0")
+    if ! crontab -l 2>/dev/null | grep -q "cleanup_logs"; then
+        (crontab -l 2>/dev/null; echo "0 3 * * 1 $current_script cleanup_logs > /dev/null 2>&1") | crontab -
+        echo -e "${GREEN}已添加每周自动清理计划任务。${PLAIN}"
+    fi
+
+    echo -e "${GREEN}清理完成！磁盘空间已释放。${PLAIN}"
+    [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
+}
+
 # --- [模块: BBR 加速]  ---
 enable_bbr() {
     echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
@@ -376,31 +436,7 @@ EOF
     show_node_info
 }
 
-# ---4. 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
-update_cf_tunnel_protocol() {
-    SERVICE_FILE="/etc/systemd/system/cloudflared.service"
-    
-    if [ -f "$SERVICE_FILE" ]; then
-        echo -e "${YELLOW}检测到 Systemd 服务，正在优化传输协议...${PLAIN}"
-        
-        # 1. 如果已经有协议参数了，先删掉旧的（防止重复堆积参数）
-        sed -i 's/--protocol [^ ]*//g' "$SERVICE_FILE"
-        
-        # 2. 在 tunnel run 后面精准插入 --protocol http2
-        sed -i 's/tunnel run/tunnel run --protocol http2/' "$SERVICE_FILE"
-        
-        # 3. 重载并重启
-        systemctl daemon-reload
-        systemctl restart cloudflared
-        
-        echo -e "${GREEN}协议已强制切换至 HTTP2 并重启服务。${PLAIN}"
-    else
-        echo -e "${RED}[错误] 未找到 cloudflared 服务文件，请先安装隧道。${PLAIN}"
-    fi
-    read -p "优化完成，按回车键返回菜单..."
-}
-
-# --- 5. 查看当前节点信息与链接  ---
+# --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
@@ -429,7 +465,7 @@ show_node_info() {
     fi
     read -p "按回车键返回菜单..."
 }
-# --- 6. 彻底卸载  ---
+# --- 5. 彻底卸载  ---
 uninstall_all() {
     echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray/Cloudflared 服务 ！！！${PLAIN}"
     read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
@@ -498,8 +534,9 @@ ${CYAN}==========================================
  ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
  ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
  ${YELLOW}7.${PLAIN} 优化 CF 隧道协议 (HTTP2)
+ ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
  ${RED}0.${PLAIN} 退出脚本"
-        read -p "选择 [0-7]: " choice
+        read -p "选择 [0-8]: " choice
         case $choice in
             1) install_vless_direct ;;
             2) install_cf_tunnel ;;
@@ -508,6 +545,7 @@ ${CYAN}==========================================
             5) uninstall_all ;;
             6) setup_cron_job ;;
             7) update_cf_tunnel_protocol ;;
+            8) cleanup_logs ;;
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
@@ -521,23 +559,40 @@ setup_cron_job() {
     # 创建守护脚本
     cat <<EOF > /usr/local/bin/xray_keep_alive.sh
 #!/bin/bash
-# 检查 Xray
+# 显式声明 PATH，确保 Cron 环境能找到 systemctl 和其他二进制文件
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 检查 Xray 状态，如果不活跃则尝试启动
 if ! systemctl is-active --quiet xray; then
-    systemctl restart xray
+    echo "\$(date): Xray 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
+    systemctl start xray
 fi
-# 检查 Cloudflare Tunnel (如果是隧道模式)
+
+# 检查 Cloudflare Tunnel (仅在服务存在时执行)
 if systemctl list-unit-files | grep -q cloudflared.service; then
     if ! systemctl is-active --quiet cloudflared; then
-        systemctl restart cloudflared
+        echo "\$(date): Cloudflared 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
+        systemctl start cloudflared
     fi
 fi
 EOF
     chmod +x /usr/local/bin/xray_keep_alive.sh
 
-    # 写入 Crontab (先清理旧的，再添加新的)
+    # 写入 Crontab (采用“先删后加”逻辑，防止多次点击导致任务重复堆积)
     (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
     
-    echo -e "${GREEN}自动守护已开启：每分钟自动检测并拉起掉线服务。${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}  自动守护已开启：每分钟自动检测并拉起服务 ${PLAIN}"
+    echo -e "${GREEN}  运行日志记录在: /var/log/xray_keep_alive.log ${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    read -p "按回车键返回菜单..."
 }
 
-main_menu
+case "$1" in
+    "cleanup_logs")
+        cleanup_logs "silent"
+        ;;
+    *)
+        main_menu
+        ;;
+esac
