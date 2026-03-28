@@ -22,7 +22,7 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
-# --- [模块 4: BBR 加速]  ---
+# --- [模块: BBR 加速]  ---
 enable_bbr() {
     echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
     if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
@@ -348,7 +348,31 @@ EOF
     show_node_info
 }
 
-# --- 4. 查看当前节点信息与链接  ---
+# ---4. 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
+update_cf_tunnel_protocol() {
+    SERVICE_FILE="/etc/systemd/system/cloudflared.service"
+    
+    if [ -f "$SERVICE_FILE" ]; then
+        echo -e "${YELLOW}检测到 Systemd 服务，正在优化传输协议...${PLAIN}"
+        
+        # 1. 如果已经有协议参数了，先删掉旧的（防止重复堆积参数）
+        sed -i 's/--protocol [^ ]*//g' "$SERVICE_FILE"
+        
+        # 2. 在 tunnel run 后面精准插入 --protocol http2
+        sed -i 's/tunnel run/tunnel run --protocol http2/' "$SERVICE_FILE"
+        
+        # 3. 重载并重启
+        systemctl daemon-reload
+        systemctl restart cloudflared
+        
+        echo -e "${GREEN}协议已强制切换至 HTTP2 并重启服务。${PLAIN}"
+    else
+        echo -e "${RED}[错误] 未找到 cloudflared 服务文件，请先安装隧道。${PLAIN}"
+    fi
+    sleep 2
+}
+
+# --- 5. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
@@ -377,7 +401,7 @@ show_node_info() {
     fi
     read -p "按回车键返回菜单..."
 }
-# --- 5. 彻底卸载  ---
+# --- 6. 彻底卸载  ---
 uninstall_all() {
     echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray/Cloudflared 服务 ！！！${PLAIN}"
     read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
@@ -445,6 +469,7 @@ ${CYAN}==========================================
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
  ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
  ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
+ ${YELLOW}7.${PLAIN} 优化 CF 隧道协议 (HTTP2)
  ${RED}0.${PLAIN} 退出脚本"
         read -p "选择 [0-6]: " choice
         case $choice in
