@@ -506,7 +506,8 @@ ${CYAN}==========================================
             3) show_node_info ;;
             4) enable_bbr ;; 
             5) uninstall_all ;;
-            6) setup_cron_job ;;  # 这里对应守护函数
+            6) setup_cron_job ;;
+            7) update_cf_tunnel_protocol ;;
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
