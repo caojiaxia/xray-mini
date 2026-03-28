@@ -175,6 +175,10 @@ EOF
 
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
+    # 变量兜底：防止全局变量失效导致空值操作风险
+    [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
+    [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
+    
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
@@ -420,7 +424,7 @@ EOF
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
-                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
+                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
                 if [[ -n "$tmp_domain" ]]; then
                     echo -e "\n${GREEN}抓取成功！域名: $tmp_domain${PLAIN}"
                     echo "$tmp_domain" > /tmp/cf_tunnel_domain
