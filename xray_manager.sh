@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 1. 权限检查 (第一时间拦截非 root 用户)
+[[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
+
 # ====================================================
 # Project: Xray xhttp & CF Tunnel 一键脚本
 # Author: BoGe & User (caojiaxia)
