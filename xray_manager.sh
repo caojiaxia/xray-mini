@@ -499,7 +499,7 @@ ${CYAN}==========================================
  ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
  ${YELLOW}7.${PLAIN} 优化 CF 隧道协议 (HTTP2)
  ${RED}0.${PLAIN} 退出脚本"
-        read -p "选择 [0-6]: " choice
+        read -p "选择 [0-7]: " choice
         case $choice in
             1) install_vless_direct ;;
             2) install_cf_tunnel ;;
