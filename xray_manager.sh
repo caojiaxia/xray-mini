@@ -25,12 +25,25 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
-# --- 自动检测网络能力并设置策略 ---
+# --- 自动检测网络能力并设置策略 (小机适配版) ---
 check_network_strategy() {
     echo -e "${BLUE}[进度] 正在探测网络环境...${PLAIN}"
+    
+    # 【物理限制检测】
+    # 获取总内存 (MB)
+    local total_mem=$(free -m | awk '/Mem:/ {print $2}')
+    
     # 默认回退策略
     strategy="AsIs"
     
+    # 如果内存小于 512MB，强制使用 AsIs 模式，跳过复杂的双栈切换，保命第一
+    if [ "$total_mem" -lt 512 ]; then
+        strategy="AsIs"
+        echo -e "${YELLOW}[注意] 检测到内存较小 (${total_mem}MB)，已自动开启低耗能模式以确保稳定。${PLAIN}"
+        return 0
+    fi
+
+    # --- 原有探测逻辑 (仅在资源充足时执行) ---
     if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
         strategy="UseIPv6"
         echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
