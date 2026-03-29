@@ -136,15 +136,16 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 【步骤 1 核心修正】：强制拉取 v1.8.24 兼容版本
-    # 无论是否存在旧核心，建议先清理，防止段错误残留
-    if [[ -f /usr/local/bin/xray ]]; then
-        rm -f /usr/local/bin/xray
-    fi
+    # 【暴力重置】：先杀进程，再删文件，确保没有内存残留
+    systemctl stop xray >/dev/null 2>&1
+    pkill -9 xray >/dev/null 2>&1
+    rm -rf /usr/local/bin/xray /usr/local/share/xray
 
-    echo -e "${YELLOW}正在从官方拉取高兼容核心 (v1.8.24)...${PLAIN}"
-    # 使用官方脚本并通过 @ 参数强制指定版本
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version v1.8.24
+    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心 (支持 xhttp)...${PLAIN}"
+    # 不带 --version，默认安装最新版
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    
+    chmod +x /usr/local/bin/xray
 
     # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
