@@ -125,7 +125,7 @@ enable_bbr() {
     fi
     read -p "按回车键返回..."
 }
-# --- 1. 基础环境安装 (强制高兼容版本) ---
+# --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -136,30 +136,33 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 【暴力重置】：先杀进程，再删文件，确保没有内存残留
+    # 【核心修改：暴力重置 + 最新版安装】
+    # 先杀进程，再物理删除文件，彻底解决可能存在的段错误残留
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
-    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心 (支持 xhttp)...${PLAIN}"
-    # 不带 --version，默认安装最新版
+    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心 (确保支持 xhttp)...${PLAIN}"
+    # 不带 --version 参数，脚本会自动安装官方最新的 Release 版本
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     
-    chmod +x /usr/local/bin/xray
-
     # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
+        # 防止文件被锁定 (部分 LXC 环境常见)
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
-        echo -e "${GREEN}[成功] 核心版本: $(/usr/local/bin/xray version | head -n 1)${PLAIN}"
+        
+        # 打印版本信息，确认 xhttp 支持情况
+        local xray_ver=$(/usr/local/bin/xray version | head -n 1)
+        echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
     # 【步骤 2】：精准定位服务文件路径
     local SERVICE_FILE="/etc/systemd/system/xray.service"
     [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
 
-    # 【步骤 3】：如果官方没生成服务文件 (NAT 常现)，则手动创建兜底配置
+    # 【步骤 3】：如果官方没生成服务文件，则手动创建 (保持你原有的 Service 结构)
     if [[ ! -f "$SERVICE_FILE" ]]; then
         echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
         cat <<EOF > /etc/systemd/system/xray.service
@@ -208,7 +211,6 @@ EOF
         return 1
     fi
 }
-
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     # 变量兜底：防止全局变量失效导致空值操作风险
