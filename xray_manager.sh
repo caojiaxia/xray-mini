@@ -25,6 +25,24 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
+# --- 自动检测网络能力并设置策略 ---
+check_network_strategy() {
+    echo -e "${BLUE}[进度] 正在探测网络环境...${PLAIN}"
+    # 默认回退策略
+    strategy="AsIs"
+    
+    if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
+        strategy="UseIPv6"
+        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
+    elif curl -4 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
+        strategy="UseIPv4"
+        echo -e "${YELLOW}[提醒] 环境不支持 IPv6，已切换至 IPv4 优先模式。${PLAIN}"
+    else
+        strategy="AsIs"
+        echo -e "${PURPLE}[提醒] 无法确认双栈连接性，使用默认解析策略。${PLAIN}"
+    fi
+}
+
 # --- 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
 update_cf_tunnel_protocol() {
     SERVICE_FILE="/etc/systemd/system/cloudflared.service"
@@ -266,6 +284,9 @@ install_vless_direct() {
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
 
+# 运行检测
+check_network_strategy
+
 # 核心配置写入
 cat <<EOF > $XRAY_CONF_DIRECT
 {
@@ -301,7 +322,7 @@ cat <<EOF > $XRAY_CONF_DIRECT
         {
             "protocol": "freedom",
             "settings": {
-                "domainStrategy": "UseIPv6"
+                "domainStrategy": "$strategy"
             }
         }
     ]
@@ -358,6 +379,9 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
+    # 运行检测
+    check_network_strategy
+
     # 写入 Xray 配置 (集成 IPv6 优先出站策略，不带 DNS 模块以防报错)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
@@ -381,7 +405,7 @@ install_cf_tunnel() {
         {
             "protocol": "freedom",
             "settings": {
-                "domainStrategy": "UseIPv6"
+                "domainStrategy": "$strategy"
             },
             "tag": "tunnel_out"
         }
