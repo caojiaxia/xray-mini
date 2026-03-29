@@ -117,13 +117,22 @@ install_base() {
         yum install -y curl wget jq socat crontabs openssl tar lsof net-tools
     fi
     
-    mkdir -p /usr/local/etc/xray $CERT_DIR
+    mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
     # 【步骤 1】：尝试官方脚本安装 
     if [[ ! -f /usr/local/bin/xray ]]; then
         echo -e "${YELLOW}检测到 Xray 核心缺失，正在尝试从官方拉取...${PLAIN}"
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
+
+    # --- 核心权限修正：解决 Permission denied ---
+    if [[ -f /usr/local/bin/xray ]]; then
+        echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
+        # 如果在某些 LXC 容器中文件被锁定，先尝试解锁
+        chattr -i /usr/local/bin/xray >/dev/null 2>&1
+        chmod +x /usr/local/bin/xray
+    fi
+    # ----------------------------------------
 
     # 【步骤 2】：精准定位服务文件路径
     local SERVICE_FILE="/etc/systemd/system/xray.service"
@@ -157,17 +166,20 @@ EOF
 
     # 【步骤 4】：修正服务配置 
     if [[ -f "$SERVICE_FILE" ]]; then
-        echo -e "${BLUE}[进度] 正在修正服务运行参数...${PLAIN}"
+        echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
         systemctl stop xray >/dev/null 2>&1
         pkill -9 xray >/dev/null 2>&1
         
-        # 即使文件是手动创建的，运行这两行 sed 也没有副作用
+        # 修正启动命令和运行用户
         sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
         sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
         
         # 清理可能存在的冲突目录和默认配置
         rm -rf "${SERVICE_FILE}.d"
         rm -f /usr/local/etc/xray/config.json
+        
+        # 赋予服务文件权限并重载
+        chmod 644 "$SERVICE_FILE"
         systemctl daemon-reload
         echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
     else
