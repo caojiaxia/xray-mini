@@ -39,7 +39,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 **NAT小机如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
 
-**在NAT环境中由于内存很小，脚本运行时服务器可能会断开，若发生请按以下方法在VPS终端执行以下命令：**
+**在NAT环境中由于内存很小，脚本运行时服务器可能会断开，若发生请在VPS终端执行以下命令：**
 
 - 1 创建一个 512MB 的交换文件 (512，这在 1G 小机上很合理)
 dd if=/dev/zero of=/swapfile bs=1M count=512
