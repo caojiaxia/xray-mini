@@ -42,25 +42,37 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 **在NAT环境中由于内存很小，脚本运行时服务器可能会断开，若发生请在VPS终端执行以下命令：**
 
 - 1 创建一个 512MB 的交换文件 (512，这在 1G 小机上很合理)
+```
 dd if=/dev/zero of=/swapfile bs=1M count=512
-
+```
 - 2 设置正确的权限（安全起见，只允许 root 读写）
+```
 chmod 600 /swapfile
-
+```
 - 3 将文件格式化为交换分区空间
+```
 mkswap /swapfile
+```
 
 - 4 立即激活 Swap
+```
 swapon /swapfile
+```
 
 - 5 验证是否成功
+```
 free -h
+```
 
 - 6 Swap 信息写入系统配置，实现永久挂载
+```
 echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+```
 
 - 7 如果你启用了脚本中的`8. 清理系统日志与垃圾`这个选项，请务必执行
+```
 grep -q "/swapfile" /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
 
 **- NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。**
 
