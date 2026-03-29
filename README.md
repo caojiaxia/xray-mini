@@ -62,15 +62,15 @@ echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
 - 7 如果你启用了脚本中的`8. 清理系统日志与垃圾`这个选项，请务必执行
 grep -q "/swapfile" /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
-- NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。
+**- NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。**
 
-- NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取trycloudflare.com域名。
+**- NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取trycloudflare.com域名。**
 
-- API 模式：申请证书前请确保`Cloudflare API Key`, `Email`及`域名`已准备就绪。
+**- API 模式：申请证书前请确保`Cloudflare API Key`, `Email`及`域名`已准备就绪。**
 
-- 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。
+**- 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。**
 
-**📁 目录结构**
+### 📁 目录结构
 
 - /usr/local/etc/xray/：核心配置文件存放地
 
@@ -78,7 +78,7 @@ grep -q "/swapfile" /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fsta
 
 - /tmp/cloudflared.log：隧道运行实时日志
 
-**🤝 贡献与反馈**
+### 🤝 贡献与反馈
 
 如果你在使用过程中发现 Bug 或有更好的功能建议，欢迎提交 Issue 或 Pull Request。
 
