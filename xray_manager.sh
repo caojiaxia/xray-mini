@@ -25,6 +25,24 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
+# --- 自动检测网络能力并设置策略 ---
+check_network_strategy() {
+    echo -e "${BLUE}[进度] 正在探测网络环境...${PLAIN}"
+    # 默认回退策略
+    strategy="AsIs"
+    
+    if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
+        strategy="UseIPv6"
+        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
+    elif curl -4 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
+        strategy="UseIPv4"
+        echo -e "${YELLOW}[提醒] 环境不支持 IPv6，已切换至 IPv4 优先模式。${PLAIN}"
+    else
+        strategy="AsIs"
+        echo -e "${PURPLE}[提醒] 无法确认双栈连接性，使用默认解析策略。${PLAIN}"
+    fi
+}
+
 # --- 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
 update_cf_tunnel_protocol() {
     SERVICE_FILE="/etc/systemd/system/cloudflared.service"
@@ -107,8 +125,7 @@ enable_bbr() {
     fi
     read -p "按回车键返回..."
 }
-
-# --- 1. 基础环境安装 ---
+# --- 1. 基础环境安装 (强制高兼容版本) ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
@@ -119,20 +136,23 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 【步骤 1】：尝试官方脚本安装 
-    if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${YELLOW}检测到 Xray 核心缺失，正在尝试从官方拉取...${PLAIN}"
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    # 【步骤 1 核心修正】：强制拉取 v1.8.24 兼容版本
+    # 无论是否存在旧核心，建议先清理，防止段错误残留
+    if [[ -f /usr/local/bin/xray ]]; then
+        rm -f /usr/local/bin/xray
     fi
+
+    echo -e "${YELLOW}正在从官方拉取高兼容核心 (v1.8.24)...${PLAIN}"
+    # 使用官方脚本并通过 @ 参数强制指定版本
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version v1.8.24
 
     # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
-        # 如果在某些 LXC 容器中文件被锁定，先尝试解锁
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
+        echo -e "${GREEN}[成功] 核心版本: $(/usr/local/bin/xray version | head -n 1)${PLAIN}"
     fi
-    # ----------------------------------------
 
     # 【步骤 2】：精准定位服务文件路径
     local SERVICE_FILE="/etc/systemd/system/xray.service"
@@ -264,7 +284,10 @@ install_vless_direct() {
     # 处理变量格式化
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
 
-    echo -e "${BLUE}[进度] 正在写入核心配置...${PLAIN}"
+    echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
+
+# 运行检测
+check_network_strategy
 
 # 核心配置写入
 cat <<EOF > $XRAY_CONF_DIRECT
@@ -292,15 +315,21 @@ cat <<EOF > $XRAY_CONF_DIRECT
                     "certificateFile": "$CERT_DIR/server.crt", 
                     "keyFile": "$CERT_DIR/server.key" 
                 }],
-                "alpn": ["h2","http/1.1"],
-                "fingerprint": "chrome"
+                "alpn": ["$alpn_formatted"],
+                "fingerprint": "$fp"
             }
         }
     }],
-    "outbounds": [{"protocol": "freedom"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "$strategy"
+            }
+        }
+    ]
 }
 EOF
-
 
     # 强力重启逻辑
     systemctl stop xray >/dev/null 2>&1
@@ -352,7 +381,10 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
-    # 写入 Xray 配置
+    # 运行检测
+    check_network_strategy
+
+    # 写入 Xray 配置 (集成 IPv6 优先出站策略，不带 DNS 模块以防报错)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -371,7 +403,15 @@ install_cf_tunnel() {
             "wsSettings": { "path": "$t_path" }
         }
     }],
-    "outbounds": [{"protocol": "freedom", "tag": "tunnel_out"}]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "$strategy"
+            },
+            "tag": "tunnel_out"
+        }
+    ]
 }
 EOF
     systemctl restart xray
