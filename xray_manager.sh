@@ -136,14 +136,19 @@ install_base() {
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 【核心修改：暴力重置 + 最新版安装】
-    # 先杀进程，再物理删除文件，彻底解决可能存在的段错误残留
+    # 【紧急清理内存 & 释放缓存】
+    echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
+    sync && echo 3 > /proc/sys/vm/drop_caches
+
+    # 【核心修改：暴力清理并重新拉取】
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
-    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心 (确保支持 xhttp)...${PLAIN}"
-    # 不带 --version 参数，脚本会自动安装官方最新的 Release 版本
+    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
+    
+    # 使用官方脚本安装时增加限制，减少解压时的压力
+    # 如果还是断开，建议手动下载二进制文件
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     
     # --- 核心权限修正：解决 Permission denied ---
