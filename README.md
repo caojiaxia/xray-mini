@@ -37,7 +37,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 ### ⚠️ 注意事项
 
-**NAT小机如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
+**在NAT环境中如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
 
 **在NAT环境中由于内存很小，脚本运行时服务器可能会断开，若发生请在VPS终端执行以下命令：**
 
