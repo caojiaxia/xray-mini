@@ -41,9 +41,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 **在NAT环境中由于内存很小，脚本运行时服务器可能会断开，若发生请在VPS终端执行以下命令：**
 
-- 1 创建一个 512MB 的交换文件 (512，这在 1G 小机上很合理)
+- 1 创建一个 256MB 的交换文件 (256，这在 1G 小机上很合理)
 ```
-dd if=/dev/zero of=/swapfile bs=1M count=512
+dd if=/dev/zero of=/swapfile bs=1M count=256
 ```
 - 2 设置正确的权限（安全起见，只允许 root 读写）
 ```
