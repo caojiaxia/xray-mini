@@ -10,6 +10,26 @@ CF_LOG="/tmp/cloudflared.log"
 # 自动探测 acme 路径，增加对不同安装方式的兼容
 [[ -f "$HOME/.acme.sh/acme.sh" ]] && ACME_BIN="$HOME/.acme.sh/acme.sh" || ACME_BIN="/root/.acme.sh/acme.sh"
 
+
+# --- 虚拟化环境检测函数 ---
+check_virt_env() {
+    # 增加兼容性处理：如果系统没安装 systemd-detect-virt，默认设为非容器
+    if ! command -v systemd-detect-virt >/dev/null 2>&1; then
+        is_container=false
+        return
+    fi
+
+    local virt=$(systemd-detect-virt)
+    if [[ "$virt" == "lxc" || "$virt" == "openvz" ]]; then
+        is_container=true
+    else
+        is_container=false
+    fi
+}
+
+# 脚本启动执行一次，给全局变量赋值
+check_virt_env
+
 # 1. 权限检查 (第一时间拦截非 root 用户)
 [[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
 
@@ -131,6 +151,12 @@ cleanup_logs() {
 
 # --- [模块: BBR 加速]  ---
 enable_bbr() {
+    # 这里的判断现在就能生效了
+    if [[ "$is_container" == "true" ]]; then
+        echo -e "${YELLOW}[跳过] 容器环境 (LXC/OpenVZ) 无法修改内核参数，请在宿主机开启 BBR。${PLAIN}"
+        read -p "按回车键返回..."
+        return
+    fi
     echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
     if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
         echo -e "${GREEN}[提示] BBR 已经处于开启状态，无需重复操作。${PLAIN}"
