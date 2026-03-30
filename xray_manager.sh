@@ -160,7 +160,7 @@ install_base() {
     if [[ $(free -m | awk '/Swap:/ {print $2}') -lt 256 ]]; then
         echo -e "${YELLOW}[优化] 检测到内存资源紧张且无 Swap，正在自动创建 512MB 虚拟内存...${PLAIN}"
         # 预防性清理旧文件
-        swapoff /swapfile >/dev/null 2>&1
+        swapon /swapfile >/dev/null 2>&1 || echo -e "${YELLOW}[跳过] 当前环境不支持开启 Swap (常见于 LXC)。${PLAIN}"
         rm -f /swapfile
         
         # 创建并挂载
@@ -315,12 +315,7 @@ install_vless_direct() {
 
     # --- 执行安装区 ---
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
-    # 这里记得检查一下是否有 Swap，如果没有，建议脚本自动帮用户挂载
-    if [[ $(free | grep -i swap | awk '{print $2}') -lt 1024 ]]; then
-        echo -e "${YELLOW}[提醒] 检测到 Swap 过小，正在为您维持 512MB 虚拟内存以防断连...${PLAIN}"
-        # 这里可以调用你之前的 swap 脚本逻辑
-    fi
-
+  
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
 
@@ -351,6 +346,7 @@ install_vless_direct() {
                 return 1
             fi
         fi
+        systemctl stop nginx apache2 2>/dev/null
         $ACME_BIN --issue -d $domain --standalone --force --non-interactive
     fi
 
@@ -572,7 +568,7 @@ EOF
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
-                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
+                tmp_domain=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1)
                 if [[ -n "$tmp_domain" ]]; then
                     echo -e "\n${GREEN}抓取成功！域名: $tmp_domain${PLAIN}"
                     echo "$tmp_domain" > /tmp/cf_tunnel_domain
@@ -683,6 +679,8 @@ uninstall_all() {
     # 清理所有残留配置
     rm -rf "$XRAY_CONF_DIR"
     rm -rf "$HOME/.acme.sh"
+    
+    sed -i '/\/swapfile/d' /etc/fstab
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
