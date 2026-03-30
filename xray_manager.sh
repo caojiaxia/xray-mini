@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# --- 路径与全局变量定义 ---
+XRAY_CONF_DIR="/usr/local/etc/xray"
+XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
+XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
+CERT_DIR="$XRAY_CONF_DIR/certs"
+CF_BIN="/usr/local/bin/cloudflared"
+CF_LOG="/tmp/cloudflared.log"
+ACME_BIN="$HOME/.acme.sh/acme.sh"  # 统一 ACME 路径
+
 # 1. 权限检查 (第一时间拦截非 root 用户)
 [[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
 
@@ -90,9 +99,12 @@ cleanup_logs() {
     [[ -f /tmp/cloudflared.log ]] && : > /tmp/cloudflared.log
     [[ -f "$CF_LOG" ]] && : > "$CF_LOG"
     
-    # 2. 清理系统日志 (journalctl) 只保留最近 1 天
+    # 2. 清理系统日志 (journalctl)
     if command -v journalctl >/dev/null 2>&1; then
+        # 既限制保留时间为 1 天，又限制总大小不超过 50MB，双重保险
         journalctl --vacuum-time=1d >/dev/null 2>&1
+        journalctl --vacuum-size=50M >/dev/null 2>&1
+        echo -e "${BLUE}[优化] 系统 Journal 日志已压缩至 50MB 以内。${PLAIN}"
     fi
 
     # 3. 清理包管理器缓存 (适配 Debian/Ubuntu/CentOS)
@@ -304,7 +316,7 @@ install_vless_direct() {
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
-        $ACME_BIN --issue --dns dns_cf -d $domain --force
+        $ACME_BIN --issue --dns dns_cf -d $domain --force--non-interactive
     else
         if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
             if lsof -i:80 > /dev/null 2>&1; then
@@ -312,7 +324,7 @@ install_vless_direct() {
                 return 1
             fi
         fi
-        $ACME_BIN --issue -d $domain --standalone --force
+        $ACME_BIN --issue -d $domain --standalone --force--non-interactive
     fi
 
     if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
@@ -682,6 +694,10 @@ setup_cron_job() {
 #!/bin/bash
 # 显式声明 PATH，确保 Cron 环境能找到 systemctl 和其他二进制文件
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 简单的文件锁防止重复运行
+exec 9>/var/lock/xray_keep_alive.lock
+if ! flock -n 9; then exit 1; fi
 
 # 检查 Xray 状态，如果不活跃则尝试启动
 if ! systemctl is-active --quiet xray; then
