@@ -39,15 +39,15 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 **在NAT环境中如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
 
-**- NAT环境中由于内存有限，如遇脚本报错断开连结，请多试几次......**
+- NAT环境中由于内存有限，如遇脚本报错断开连结，请多试几次......
 
-**- NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。**
+- NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。
 
-**- NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取trycloudflare.com域名。**
+- NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取trycloudflare.com域名。
 
-**- API 模式：申请证书前请确保`Cloudflare API Key`, `Email`及`域名`已准备就绪。**
+- API 模式：申请证书前请确保`Cloudflare API Key`, `Email`及`域名`已准备就绪。
 
-**- 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。**
+- 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。
 
 ### 📁 目录结构
 
