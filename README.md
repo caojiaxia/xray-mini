@@ -39,7 +39,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 **在NAT环境中如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
 
-- NAT环境中由于内存有限，如遇脚本报错断开连结，请多试几次......
+- NAT环境：由于内存有限，如遇脚本报错断开连结，请多试几次......
 
 - NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。
 
