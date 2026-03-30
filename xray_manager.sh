@@ -1,13 +1,13 @@
 #!/bin/bash
 
+# 1. 权限检查 (第一时间拦截非 root 用户)
+[[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
+
 # ====================================================
 # Project: Xray xhttp & CF Tunnel 一键脚本
 # Author: BoGe & User (caojiaxia)
 # System: Debian/Ubuntu/CentOS
 # ====================================================
-
-# 1. 权限检查 (第一时间拦截非 root 用户)
-[[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
 
 # 颜色和路径定义 
 RED='\033[0;31m'
@@ -18,43 +18,12 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# --- 全局路径定义 (确保函数内外都能访问) ---
 XRAY_CONF_DIR="/usr/local/etc/xray"
 XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
 XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
 CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
-ACME_BIN="/root/.acme.sh/acme.sh"
-
-# --- 虚拟化环境检测函数 ---
-check_virt_env() {
-    # 增加兼容性处理：如果系统没安装 systemd-detect-virt，默认设为非容器
-    if ! command -v systemd-detect-virt >/dev/null 2>&1; then
-        is_container=false
-        return
-    fi
-
-    local virt=$(systemd-detect-virt)
-    if [[ "$virt" == "lxc" || "$virt" == "openvz" ]]; then
-        is_container=true
-    else
-        is_container=false
-    fi
-}
-# 脚本启动执行一次，给全局变量赋值
-check_virt_env
-
-# 统一安装 acme 的逻辑
-install_acme() {
-    if [[ ! -f "$ACME_BIN" ]]; then
-        curl https://get.acme.sh | sh
-        # 建立全局软链接，彻底解决路径报错
-        ln -s  ~/.acme.sh/acme.sh /usr/local/bin/acme.sh
-    fi
-    # 无论路径在哪，确保这一行能跑通
-    acme.sh --set-default-ca --server letsencrypt
-}
 
 # --- 自动检测网络能力并设置策略 (小机适配版) ---
 check_network_strategy() {
@@ -121,12 +90,9 @@ cleanup_logs() {
     [[ -f /tmp/cloudflared.log ]] && : > /tmp/cloudflared.log
     [[ -f "$CF_LOG" ]] && : > "$CF_LOG"
     
-    # 2. 清理系统日志 (journalctl)
+    # 2. 清理系统日志 (journalctl) 只保留最近 1 天
     if command -v journalctl >/dev/null 2>&1; then
-        # 既限制保留时间为 1 天，又限制总大小不超过 50MB，双重保险
         journalctl --vacuum-time=1d >/dev/null 2>&1
-        journalctl --vacuum-size=50M >/dev/null 2>&1
-        echo -e "${BLUE}[优化] 系统 Journal 日志已压缩至 50MB 以内。${PLAIN}"
     fi
 
     # 3. 清理包管理器缓存 (适配 Debian/Ubuntu/CentOS)
@@ -152,12 +118,6 @@ cleanup_logs() {
 
 # --- [模块: BBR 加速]  ---
 enable_bbr() {
-    # 这里的判断现在就能生效了
-    if [[ "$is_container" == "true" ]]; then
-        echo -e "${YELLOW}[跳过] 容器环境 (LXC/OpenVZ) 无法修改内核参数，请在宿主机开启 BBR。${PLAIN}"
-        read -p "按回车键返回..."
-        return
-    fi
     echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
     if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
         echo -e "${GREEN}[提示] BBR 已经处于开启状态，无需重复操作。${PLAIN}"
@@ -180,36 +140,6 @@ enable_bbr() {
 }
 # --- 1. 基础环境安装 ---
 install_base() {
-    # 如果已经安装过核心，仅更新配置，不重复下载，节省时间且保护现有连接
-    if [[ -f "$XRAY_BIN" ]]; then
-        echo -e "${GREEN}[提示] Xray 核心已存在，跳过安装步骤。${PLAIN}"
-        mkdir -p "$XRAY_CONF_DIR" "$CERT_DIR"
-        return 0
-    fi
-    
-    echo -e "${BLUE}[进度] 正在检查系统资源与依赖...${PLAIN}"
-    
-    # 【自动挂载 Swap 补丁】
-    # 如果检测到当前 Swap 小于 256MB，则创建一个 256MB 的临时交换文件
-    if [[ $(free -m | awk '/Swap:/ {print $2}') -lt 256 ]]; then
-        echo -e "${YELLOW}[优化] 检测到内存资源紧张且无 Swap，正在自动创建 256MB 虚拟内存...${PLAIN}"
-        # 预防性清理旧文件
-        swapon /swapfile >/dev/null 2>&1 || echo -e "${YELLOW}[跳过] 当前环境不支持开启 Swap (常见于 LXC)。${PLAIN}"
-        rm -f /swapfile
-        
-        # 创建并挂载
-        dd if=/dev/zero of=/swapfile bs=1M count=256 status=progress
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
-        
-        # 写入 fstab 实现开机自动挂载（防止重启后失效）
-        if ! grep -q "/swapfile" /etc/fstab; then
-            echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
-        fi
-        echo -e "${GREEN}[成功] 虚拟内存已就绪。${PLAIN}"
-    fi
-
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools
@@ -301,7 +231,7 @@ EOF
 }
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
-    # 变量兜底
+    # 变量兜底：防止全局变量失效导致空值操作风险
     [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
     [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
     
@@ -309,31 +239,14 @@ install_vless_direct() {
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
     
-    # --- 变量生成区 ---
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
+    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
     local r_alpn="h2,http/1.1"
 
-    # 定义专业伪装路径池
-    local PATH_POOL=(
-        "/api/v1/auth/login"
-        "/api/v2/user/profile"
-        "/api/v3/report/metrics"
-        "/assets/data/report"
-        "/assets/logs/upload"
-        "/static/v1/internal/trace"
-        "/cdn-cgi/v2/telemetry"
-        "/api/client/v4/update"
-        "/socket.io/v4/transport"
-        "/ws/chat/v3/connect"
-    )
-    # 从池子中随机选取一个默认路径
-    local r_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
-
-    # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
-    [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return;}
+    [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
     echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
@@ -347,13 +260,12 @@ install_vless_direct() {
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    # --- 执行安装区 ---
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
-  
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
 
     echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
+    # --- 集成修正部分：确保 acme.sh 安装与路径绝对化 ---
     if [[ ! -f ~/.acme.sh/acme.sh ]]; then
         curl https://get.acme.sh | sh -s email=admin@$domain
     fi
@@ -362,9 +274,6 @@ install_vless_direct() {
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
     $ACME_BIN --set-default-ca --server letsencrypt
     # ------------------------------------------------
-
-    # 显式导出 PATH 确保 acme.sh 能找到 socat
-    export PATH="$PATH:$HOME/.acme.sh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
     if [[ "$c_mode" == "2" ]]; then
         read -p "请输入 CF Email: " cf_e
@@ -379,21 +288,17 @@ install_vless_direct() {
                 return 1
             fi
         fi
-        systemctl stop nginx apache2 2>/dev/null
         $ACME_BIN --issue -d $domain --standalone --force
     fi
 
-    #  acme.sh 续期时会自动更新这里的证书文件并重启 xray
-    if [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
-        echo -e "${GREEN}[成功] 发现证书，正在安装...${PLAIN}"
-        mkdir -p "$CERT_DIR"
-        $ACME_EXEC --install-cert -d "$domain" --ecc \
-            --fullchain-file "$CERT_DIR/server.crt" \
-            --key-file "$CERT_DIR/server.key" \
-            --reloadcmd "systemctl restart xray"
+    if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
+        echo -e "${GREEN}[成功] 证书就绪，正在同步至 Xray 目录...${PLAIN}"
+        mkdir -p $CERT_DIR
+        cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
+        cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
+        chmod 644 $CERT_DIR/server.key $CERT_DIR/server.crt
     else
-        echo -e "${RED}[致命错误] 证书文件不存在！${PLAIN}"
-        echo -e "${YELLOW}请检查：1. 域名是否解析 2. 80端口是否开放 3. 是否开启了小云朵${PLAIN}"
+        echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
         return 1
     fi
 
@@ -402,8 +307,10 @@ install_vless_direct() {
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
 
-# 运行网络检测并写入配置
+# 运行检测
 check_network_strategy
+
+# 核心配置写入
 cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
@@ -413,7 +320,7 @@ cat <<EOF > $XRAY_CONF_DIRECT
         "protocol": "vless",
         "tag": "$node_name",
         "settings": { 
-            "clients": [{"id": "$r_uuid"}], 
+            "clients": [{"id": "$uuid"}], 
             "decryption": "none" 
         },
         "streamSettings": {
@@ -462,42 +369,23 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel (已集成专业路径池与 IPv6 优化) ---
+# --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
     
-    # --- 1. 定义专业伪装路径池 (与 VLESS 模块保持一致) ---
-    local PATH_POOL=(
-        "/api/v1/auth/login"
-        "/api/v2/user/profile"
-        "/api/v3/report/metrics"
-        "/assets/data/report"
-        "/assets/logs/upload"
-        "/static/v1/internal/trace"
-        "/cdn-cgi/v2/telemetry"
-        "/api/client/v4/update"
-        "/socket.io/v4/transport"
-        "/ws/chat/v3/connect"
-    )
-
-    # --- 2. 生成默认值 ---
+    # 生成默认值
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    # 从池子中随机选取一个作为默认路径
-    local r_t_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
+    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_t_port=$((RANDOM % 55535 + 10000))
     
-    # --- 3. 用户输入交互 ---
     echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
     read -p "选择 [1-2]: " t_choice
     
     read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
     t_uuid=${t_uuid:-$r_t_uuid}
-
     read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
     t_node_name=${t_node_name:-"CF_Tunnel"}
-
-    # 这里会显示池子里抽出的专业路径
     read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
     t_path=${t_path:-$r_t_path}
 
@@ -514,9 +402,10 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
-    # 4. 运行检测与配置写入
+    # 运行检测
     check_network_strategy
 
+    # 写入 Xray 配置 (集成 IPv6 优先出站策略，不带 DNS 模块以防报错)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -547,15 +436,12 @@ install_cf_tunnel() {
 }
 EOF
     systemctl restart xray
-    sleep 1  # 增加 1 秒缓冲，确保端口已完全监听，防止 cloudflared 启动瞬间连不上回源端口
 
     # 下载与权限
     if [[ ! -f $CF_BIN ]]; then
-        echo -e "${YELLOW}正在检测架构并下载 cloudflared...${PLAIN}"
-        local arch=$(uname -m)
-        local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-        [[ "$arch" == "aarch64" ]] && cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-        wget -O $CF_BIN $cf_url && chmod +x $CF_BIN
+        echo -e "${YELLOW}正在下载 cloudflared...${PLAIN}"
+        wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x $CF_BIN
     fi
 
     # Systemd 守护进程运行 cloudflared
@@ -566,11 +452,11 @@ EOF
 
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        # 临时隧道直接强制 http2
-        cf_cmd="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
+        # 临时隧道直接在启动命令中加入 --protocol http2
+        cf_cmd="tunnel --protocol http2 --url http://localhost:$t_port"
     else
-        # 固定隧道：不仅带 token，还要强制 http2 运行模式，性能更佳
-        cf_cmd="tunnel --protocol http2 --no-autoupdate run --token $t_token"
+        # 固定隧道使用 token 运行
+        cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
     cat <<EOF > /etc/systemd/system/cloudflared.service
@@ -600,7 +486,7 @@ EOF
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -f $CF_LOG ]]; then
-                tmp_domain=$(grep -oE "[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1)
+                tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
                 if [[ -n "$tmp_domain" ]]; then
                     echo -e "\n${GREEN}抓取成功！域名: $tmp_domain${PLAIN}"
                     echo "$tmp_domain" > /tmp/cf_tunnel_domain
@@ -672,13 +558,11 @@ uninstall_all() {
     systemctl daemon-reload
 
     echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
-    # 安全删除：确保变量不为空时才执行，或者直接写死路径
-    [[ -n "$CERT_DIR" ]] && rm -rf "$CERT_DIR"
     rm -rf /usr/local/etc/xray
+    rm -rf $CERT_DIR
     rm -f /usr/local/bin/xray
     rm -f /usr/local/bin/cloudflared
-    # 如果定义了 $CF_BIN 变量也一并清除
-    [[ -n "$CF_BIN" ]] && rm -f "$CF_BIN"
+    rm -f $CF_BIN
 
     echo -e "${YELLOW}[4/5] 正在清理临时文件与日志...${PLAIN}"
     rm -f /tmp/cloudflared.log
@@ -693,26 +577,14 @@ uninstall_all() {
     # 清理自动守护脚本文件
     rm -f /usr/local/bin/xray_keep_alive.sh
     
-    # 强力清理 crontab (保留非脚本相关的任务)
-    if crontab -l >/dev/null 2>&1; then
-        crontab -l | grep -vE "acme.sh|xray_keep_alive.sh" | crontab -
-    fi
+    # 一次性清理 crontab 中的所有相关任务 (acme 和 守护脚本)
+    # 使用 egrep 过滤多个关键词
+    crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh" | crontab - >/dev/null 2>&1
 
-    # 全面清理 shell 环境变量
-    for profile in ~/.bashrc ~/.profile ~/.bash_profile; do
-        [[ -f "$profile" ]] && sed -i '/acme.sh/d' "$profile"
-    done
-
-    # 增加对 acme 计划任务的清理
-    if [[ -f "$ACME_BIN" ]]; then
-        $ACME_BIN --uninstall
+    # 清理 ~/.bashrc 中的 acme.sh 环境变量
+    if [[ -f ~/.bashrc ]]; then
+        sed -i '/acme.sh/d' ~/.bashrc
     fi
-    
-    # 清理所有残留配置
-    rm -rf "$XRAY_CONF_DIR"
-    rm -rf "$HOME/.acme.sh"
-    
-    sed -i '/\/swapfile/d' /etc/fstab
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
@@ -762,10 +634,6 @@ setup_cron_job() {
 #!/bin/bash
 # 显式声明 PATH，确保 Cron 环境能找到 systemctl 和其他二进制文件
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# 简单的文件锁防止重复运行
-exec 9>/var/lock/xray_keep_alive.lock
-if ! flock -n 9; then exit 1; fi
 
 # 检查 Xray 状态，如果不活跃则尝试启动
 if ! systemctl is-active --quiet xray; then
