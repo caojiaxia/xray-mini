@@ -7,7 +7,8 @@ XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
 CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
-ACME_BIN="$HOME/.acme.sh/acme.sh"  # 统一 ACME 路径
+# 自动探测 acme 路径，增加对不同安装方式的兼容
+[[ -f "$HOME/.acme.sh/acme.sh" ]] && ACME_BIN="$HOME/.acme.sh/acme.sh" || ACME_BIN="/root/.acme.sh/acme.sh"
 
 # 1. 权限检查 (第一时间拦截非 root 用户)
 [[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
@@ -152,6 +153,29 @@ enable_bbr() {
 }
 # --- 1. 基础环境安装 ---
 install_base() {
+    echo -e "${BLUE}[进度] 正在检查系统资源与依赖...${PLAIN}"
+    
+    # 【自动挂载 Swap 补丁】
+    # 如果检测到当前 Swap 小于 256MB，则创建一个 512MB 的临时交换文件
+    if [[ $(free -m | awk '/Swap:/ {print $2}') -lt 256 ]]; then
+        echo -e "${YELLOW}[优化] 检测到内存资源紧张且无 Swap，正在自动创建 512MB 虚拟内存...${PLAIN}"
+        # 预防性清理旧文件
+        swapoff /swapfile >/dev/null 2>&1
+        rm -f /swapfile
+        
+        # 创建并挂载
+        dd if=/dev/zero of=/swapfile bs=1M count=512 status=progress
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        
+        # 写入 fstab 实现开机自动挂载（防止重启后失效）
+        if ! grep -q "/swapfile" /etc/fstab; then
+            echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+        fi
+        echo -e "${GREEN}[成功] 虚拟内存已就绪。${PLAIN}"
+    fi
+
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools
@@ -311,12 +335,15 @@ install_vless_direct() {
     $ACME_BIN --set-default-ca --server letsencrypt
     # ------------------------------------------------
 
+    # 显式导出 PATH 确保 acme.sh 能找到 socat
+    export PATH="$PATH:$HOME/.acme.sh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
     if [[ "$c_mode" == "2" ]]; then
         read -p "请输入 CF Email: " cf_e
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
-        $ACME_BIN --issue --dns dns_cf -d $domain --force--non-interactive
+        $ACME_BIN --issue --dns dns_cf -d $domain --force --non-interactive
     else
         if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
             if lsof -i:80 > /dev/null 2>&1; then
@@ -324,15 +351,17 @@ install_vless_direct() {
                 return 1
             fi
         fi
-        $ACME_BIN --issue -d $domain --standalone --force--non-interactive
+        $ACME_BIN --issue -d $domain --standalone --force --non-interactive
     fi
 
-    if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
-        echo -e "${GREEN}[成功] 证书就绪，正在同步至 Xray 目录...${PLAIN}"
-        mkdir -p $CERT_DIR
-        cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
-        cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
-        chmod 644 $CERT_DIR/server.key $CERT_DIR/server.crt
+    #  acme.sh 续期时会自动更新这里的证书文件并重启 xray
+    if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]]; then
+        echo -e "${GREEN}[成功] 证书就绪，正在安装至 Xray 目录...${PLAIN}"
+        mkdir -p "$CERT_DIR"
+        $ACME_BIN --install-cert -d "$domain" --ecc \
+            --fullchain-file "$CERT_DIR/server.crt" \
+            --key-file "$CERT_DIR/server.key" \
+            --reloadcmd "systemctl restart xray"
     else
         echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
         return 1
@@ -645,6 +674,15 @@ uninstall_all() {
     for profile in ~/.bashrc ~/.profile ~/.bash_profile; do
         [[ -f "$profile" ]] && sed -i '/acme.sh/d' "$profile"
     done
+
+    # 增加对 acme 计划任务的清理
+    if [[ -f "$ACME_BIN" ]]; then
+        $ACME_BIN --uninstall
+    fi
+    
+    # 清理所有残留配置
+    rm -rf "$XRAY_CONF_DIR"
+    rm -rf "$HOME/.acme.sh"
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
