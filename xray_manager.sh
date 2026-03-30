@@ -1,7 +1,31 @@
 #!/bin/bash
 
+# ====================================================
+# Project: Xray xhttp & CF Tunnel 一键脚本
+# Author: BoGe & User (caojiaxia)
+# System: Debian/Ubuntu/CentOS
+# ====================================================
+
 # 1. 权限检查 (第一时间拦截非 root 用户)
 [[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
+
+# 颜色和路径定义 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+PLAIN='\033[0m'
+
+# --- 全局路径定义 (确保函数内外都能访问) ---
+XRAY_CONF_DIR="/usr/local/etc/xray"
+XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
+XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
+CERT_DIR="$XRAY_CONF_DIR/certs"
+CF_BIN="/usr/local/bin/cloudflared"
+CF_LOG="/tmp/cloudflared.log"
+ACME_BIN="/root/.acme.sh/acme.sh"
 
 # --- 虚拟化环境检测函数 ---
 check_virt_env() {
@@ -18,34 +42,8 @@ check_virt_env() {
         is_container=false
     fi
 }
-
 # 脚本启动执行一次，给全局变量赋值
 check_virt_env
-
-# ====================================================
-# Project: Xray xhttp & CF Tunnel 一键脚本
-# Author: BoGe & User (caojiaxia)
-# System: Debian/Ubuntu/CentOS
-# ====================================================
-
-# 颜色和路径定义 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-PLAIN='\033[0m'
-
-# --- 路径与全局变量定义 ---
-XRAY_CONF_DIR="/usr/local/etc/xray"
-XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
-XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
-CERT_DIR="$XRAY_CONF_DIR/certs"
-CF_BIN="/usr/local/bin/cloudflared"
-CF_LOG="/tmp/cloudflared.log"
-# 自动探测 acme 路径，增加对不同安装方式的兼容
-[[ -f "$HOME/.acme.sh/acme.sh" ]] && ACME_BIN="$HOME/.acme.sh/acme.sh" || ACME_BIN="/root/.acme.sh/acme.sh"
 
 # 统一安装 acme 的逻辑
 install_acme() {
