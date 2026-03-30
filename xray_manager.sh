@@ -190,15 +190,15 @@ install_base() {
     echo -e "${BLUE}[进度] 正在检查系统资源与依赖...${PLAIN}"
     
     # 【自动挂载 Swap 补丁】
-    # 如果检测到当前 Swap 小于 256MB，则创建一个 512MB 的临时交换文件
+    # 如果检测到当前 Swap 小于 256MB，则创建一个 256MB 的临时交换文件
     if [[ $(free -m | awk '/Swap:/ {print $2}') -lt 256 ]]; then
-        echo -e "${YELLOW}[优化] 检测到内存资源紧张且无 Swap，正在自动创建 512MB 虚拟内存...${PLAIN}"
+        echo -e "${YELLOW}[优化] 检测到内存资源紧张且无 Swap，正在自动创建 256MB 虚拟内存...${PLAIN}"
         # 预防性清理旧文件
         swapon /swapfile >/dev/null 2>&1 || echo -e "${YELLOW}[跳过] 当前环境不支持开启 Swap (常见于 LXC)。${PLAIN}"
         rm -f /swapfile
         
         # 创建并挂载
-        dd if=/dev/zero of=/swapfile bs=1M count=512 status=progress
+        dd if=/dev/zero of=/swapfile bs=1M count=256 status=progress
         chmod 600 /swapfile
         mkswap /swapfile
         swapon /swapfile
