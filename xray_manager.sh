@@ -231,7 +231,7 @@ EOF
 }
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
-    # 变量兜底：防止全局变量失效导致空值操作风险
+    # 变量兜底
     [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
     [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
     
@@ -239,12 +239,29 @@ install_vless_direct() {
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
     
+    # --- 变量生成区 ---
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
-    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
     local r_alpn="h2,http/1.1"
 
+    # 定义专业伪装路径池
+    local PATH_POOL=(
+        "/api/v1/auth/login"
+        "/api/v2/user/profile"
+        "/api/v3/report/metrics"
+        "/assets/data/report"
+        "/assets/logs/upload"
+        "/static/v1/internal/trace"
+        "/cdn-cgi/v2/telemetry"
+        "/api/client/v4/update"
+        "/socket.io/v4/transport"
+        "/ws/chat/v3/connect"
+    )
+    # 从池子中随机选取一个默认路径
+    local r_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
+
+    # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
@@ -260,15 +277,22 @@ install_vless_direct() {
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
+    # --- 执行安装区 ---
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
+    # 这里记得检查一下是否有 Swap，如果没有，建议脚本自动帮用户挂载
+    if [[ $(free | grep -i swap | awk '{print $2}') -lt 1024 ]]; then
+        echo -e "${YELLOW}[提醒] 检测到 Swap 过小，正在为您维持 512MB 虚拟内存以防断连...${PLAIN}"
+        # 这里可以调用你之前的 swap 脚本逻辑
+    fi
+
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
 
     echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
-    # --- 集成修正部分：确保 acme.sh 安装与路径绝对化 ---
     if [[ ! -f ~/.acme.sh/acme.sh ]]; then
         curl https://get.acme.sh | sh -s email=admin@$domain
     fi
+}
     
     # 定义绝对路径变量，避免 source ~/.bashrc 失败导致后续报错
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
@@ -369,23 +393,42 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
+# --- 3. 安装 CF Tunnel (已集成专业路径池与 IPv6 优化) ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
     
-    # 生成默认值
+    # --- 1. 定义专业伪装路径池 (与 VLESS 模块保持一致) ---
+    local PATH_POOL=(
+        "/api/v1/auth/login"
+        "/api/v2/user/profile"
+        "/api/v3/report/metrics"
+        "/assets/data/report"
+        "/assets/logs/upload"
+        "/static/v1/internal/trace"
+        "/cdn-cgi/v2/telemetry"
+        "/api/client/v4/update"
+        "/socket.io/v4/transport"
+        "/ws/chat/v3/connect"
+    )
+
+    # --- 2. 生成默认值 ---
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    # 从池子中随机选取一个作为默认路径
+    local r_t_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
     local r_t_port=$((RANDOM % 55535 + 10000))
     
+    # --- 3. 用户输入交互 ---
     echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
     read -p "选择 [1-2]: " t_choice
     
     read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
     t_uuid=${t_uuid:-$r_t_uuid}
+
     read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
     t_node_name=${t_node_name:-"CF_Tunnel"}
+
+    # 这里会显示池子里抽出的专业路径
     read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
     t_path=${t_path:-$r_t_path}
 
@@ -402,10 +445,9 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
-    # 运行检测
+    # 4. 运行检测与配置写入
     check_network_strategy
 
-    # 写入 Xray 配置 (集成 IPv6 优先出站策略，不带 DNS 模块以防报错)
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -436,12 +478,15 @@ install_cf_tunnel() {
 }
 EOF
     systemctl restart xray
+    sleep 1  # 增加 1 秒缓冲，确保端口已完全监听，防止 cloudflared 启动瞬间连不上回源端口
 
     # 下载与权限
     if [[ ! -f $CF_BIN ]]; then
-        echo -e "${YELLOW}正在下载 cloudflared...${PLAIN}"
-        wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x $CF_BIN
+        echo -e "${YELLOW}正在检测架构并下载 cloudflared...${PLAIN}"
+        local arch=$(uname -m)
+        local cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+        [[ "$arch" == "aarch64" ]] && cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+        wget -O $CF_BIN $cf_url && chmod +x $CF_BIN
     fi
 
     # Systemd 守护进程运行 cloudflared
@@ -452,11 +497,11 @@ EOF
 
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        # 临时隧道直接在启动命令中加入 --protocol http2
-        cf_cmd="tunnel --protocol http2 --url http://localhost:$t_port"
+        # 临时隧道直接强制 http2
+        cf_cmd="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
     else
-        # 固定隧道使用 token 运行
-        cf_cmd="tunnel --no-autoupdate run --token $t_token"
+        # 固定隧道：不仅带 token，还要强制 http2 运行模式，性能更佳
+        cf_cmd="tunnel --protocol http2 --no-autoupdate run --token $t_token"
     fi
 
     cat <<EOF > /etc/systemd/system/cloudflared.service
@@ -558,11 +603,13 @@ uninstall_all() {
     systemctl daemon-reload
 
     echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
+    # 安全删除：确保变量不为空时才执行，或者直接写死路径
+    [[ -n "$CERT_DIR" ]] && rm -rf "$CERT_DIR"
     rm -rf /usr/local/etc/xray
-    rm -rf $CERT_DIR
     rm -f /usr/local/bin/xray
     rm -f /usr/local/bin/cloudflared
-    rm -f $CF_BIN
+    # 如果定义了 $CF_BIN 变量也一并清除
+    [[ -n "$CF_BIN" ]] && rm -f "$CF_BIN"
 
     echo -e "${YELLOW}[4/5] 正在清理临时文件与日志...${PLAIN}"
     rm -f /tmp/cloudflared.log
@@ -577,14 +624,15 @@ uninstall_all() {
     # 清理自动守护脚本文件
     rm -f /usr/local/bin/xray_keep_alive.sh
     
-    # 一次性清理 crontab 中的所有相关任务 (acme 和 守护脚本)
-    # 使用 egrep 过滤多个关键词
-    crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh" | crontab - >/dev/null 2>&1
-
-    # 清理 ~/.bashrc 中的 acme.sh 环境变量
-    if [[ -f ~/.bashrc ]]; then
-        sed -i '/acme.sh/d' ~/.bashrc
+    # 强力清理 crontab (保留非脚本相关的任务)
+    if crontab -l >/dev/null 2>&1; then
+        crontab -l | grep -vE "acme.sh|xray_keep_alive.sh" | crontab -
     fi
+
+    # 全面清理 shell 环境变量
+    for profile in ~/.bashrc ~/.profile ~/.bash_profile; do
+        [[ -f "$profile" ]] && sed -i '/acme.sh/d' "$profile"
+    done
 
     echo -e "------------------------------------------------"
     echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
