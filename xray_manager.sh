@@ -384,15 +384,16 @@ install_vless_direct() {
     fi
 
     #  acme.sh 续期时会自动更新这里的证书文件并重启 xray
-    if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]]; then
-        echo -e "${GREEN}[成功] 证书就绪，正在安装至 Xray 目录...${PLAIN}"
+    if [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
+        echo -e "${GREEN}[成功] 发现证书，正在安装...${PLAIN}"
         mkdir -p "$CERT_DIR"
-        $ACME_BIN --install-cert -d "$domain" --ecc \
+        $ACME_EXEC --install-cert -d "$domain" --ecc \
             --fullchain-file "$CERT_DIR/server.crt" \
             --key-file "$CERT_DIR/server.key" \
             --reloadcmd "systemctl restart xray"
     else
-        echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
+        echo -e "${RED}[致命错误] 证书文件不存在！${PLAIN}"
+        echo -e "${YELLOW}请检查：1. 域名是否解析 2. 80端口是否开放 3. 是否开启了小云朵${PLAIN}"
         return 1
     fi
 
