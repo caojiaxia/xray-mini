@@ -1,15 +1,7 @@
 #!/bin/bash
 
-# --- 路径与全局变量定义 ---
-XRAY_CONF_DIR="/usr/local/etc/xray"
-XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
-XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
-CERT_DIR="$XRAY_CONF_DIR/certs"
-CF_BIN="/usr/local/bin/cloudflared"
-CF_LOG="/tmp/cloudflared.log"
-# 自动探测 acme 路径，增加对不同安装方式的兼容
-[[ -f "$HOME/.acme.sh/acme.sh" ]] && ACME_BIN="$HOME/.acme.sh/acme.sh" || ACME_BIN="/root/.acme.sh/acme.sh"
-
+# 1. 权限检查 (第一时间拦截非 root 用户)
+[[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
 
 # --- 虚拟化环境检测函数 ---
 check_virt_env() {
@@ -30,9 +22,6 @@ check_virt_env() {
 # 脚本启动执行一次，给全局变量赋值
 check_virt_env
 
-# 1. 权限检查 (第一时间拦截非 root 用户)
-[[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
-
 # ====================================================
 # Project: Xray xhttp & CF Tunnel 一键脚本
 # Author: BoGe & User (caojiaxia)
@@ -48,12 +37,26 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
+# --- 路径与全局变量定义 ---
 XRAY_CONF_DIR="/usr/local/etc/xray"
 XRAY_CONF_DIRECT="$XRAY_CONF_DIR/conf_1_direct.json"
 XRAY_CONF_TUNNEL="$XRAY_CONF_DIR/conf_2_tunnel.json"
 CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
+# 自动探测 acme 路径，增加对不同安装方式的兼容
+[[ -f "$HOME/.acme.sh/acme.sh" ]] && ACME_BIN="$HOME/.acme.sh/acme.sh" || ACME_BIN="/root/.acme.sh/acme.sh"
+
+# 统一安装 acme 的逻辑
+install_acme() {
+    if [[ ! -f "$ACME_BIN" ]]; then
+        curl https://get.acme.sh | sh
+        # 建立全局软链接，彻底解决路径报错
+        ln -s  ~/.acme.sh/acme.sh /usr/local/bin/acme.sh
+    fi
+    # 无论路径在哪，确保这一行能跑通
+    acme.sh --set-default-ca --server letsencrypt
+}
 
 # --- 自动检测网络能力并设置策略 (小机适配版) ---
 check_network_strategy() {
@@ -179,6 +182,13 @@ enable_bbr() {
 }
 # --- 1. 基础环境安装 ---
 install_base() {
+    # 如果已经安装过核心，仅更新配置，不重复下载，节省时间且保护现有连接
+    if [[ -f "$XRAY_BIN" ]]; then
+        echo -e "${GREEN}[提示] Xray 核心已存在，跳过安装步骤。${PLAIN}"
+        mkdir -p "$XRAY_CONF_DIR" "$CERT_DIR"
+        return 0
+    fi
+    
     echo -e "${BLUE}[进度] 正在检查系统资源与依赖...${PLAIN}"
     
     # 【自动挂载 Swap 补丁】
