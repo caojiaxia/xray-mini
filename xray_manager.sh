@@ -333,7 +333,7 @@ install_vless_direct() {
 
     # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
-    [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
+    [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return;
     
     echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
@@ -402,10 +402,8 @@ install_vless_direct() {
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
 
-# 运行检测
+# 运行网络检测并写入配置
 check_network_strategy
-
-# 核心配置写入
 cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
