@@ -371,7 +371,7 @@ install_vless_direct() {
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
-        $ACME_BIN --issue --dns dns_cf -d $domain --force --non-interactive
+        $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
         if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
             if lsof -i:80 > /dev/null 2>&1; then
@@ -380,7 +380,7 @@ install_vless_direct() {
             fi
         fi
         systemctl stop nginx apache2 2>/dev/null
-        $ACME_BIN --issue -d $domain --standalone --force --non-interactive
+        $ACME_BIN --issue -d $domain --standalone --force
     fi
 
     #  acme.sh 续期时会自动更新这里的证书文件并重启 xray
