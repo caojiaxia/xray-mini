@@ -56,30 +56,6 @@ check_network_strategy() {
     fi
 }
 
-# --- 优化 CF Tunnel 传输协议 (HTTP2 模式) ---
-update_cf_tunnel_protocol() {
-    SERVICE_FILE="/etc/systemd/system/cloudflared.service"
-    
-    if [ -f "$SERVICE_FILE" ]; then
-        echo -e "${YELLOW}检测到 Systemd 服务，正在优化传输协议...${PLAIN}"
-        
-        # 1. 如果已经有协议参数了，先删掉旧的（防止重复堆积参数）
-        sed -i 's/--protocol [^ ]*//g' "$SERVICE_FILE"
-        
-        # 2. 在 tunnel run 后面精准插入 --protocol http2
-        sed -i 's/tunnel run/tunnel run --protocol http2/' "$SERVICE_FILE"
-        
-        # 3. 重载并重启
-        systemctl daemon-reload
-        systemctl restart cloudflared
-        
-        echo -e "${GREEN}协议已强制切换至 HTTP2 并重启服务。${PLAIN}"
-    else
-        echo -e "${RED}[错误] 未找到 cloudflared 服务文件，请先安装隧道。${PLAIN}"
-    fi
-    read -p "优化完成，按回车键返回菜单..."
-}
-
 # ---  自动清理日志与系统垃圾 ---
 cleanup_logs() {
     echo -e "${YELLOW}正在执行系统瘦身与日志清理...${PLAIN}"
@@ -531,9 +507,7 @@ EOF
         done
         [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请检查日志: $CF_LOG${PLAIN}"
     else
-        echo -e "${GREEN}固定隧道服务已启动，正在执行 HTTP2 协议优化...${PLAIN}"
-        # 针对固定隧道，调用协议优化函数
-        update_cf_tunnel_protocol
+        echo -e "${GREEN}固定隧道服务已启动...${PLAIN}"
         sleep 1
     fi
     
