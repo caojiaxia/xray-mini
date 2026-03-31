@@ -227,6 +227,9 @@ install_vless_direct() {
         "/api/client/v4/update"
         "/socket.io/v4/transport"
         "/ws/chat/v3/connect"
+        "/play/hls/live/segment1.ts"
+        "/static/js/main.d2758a0.js"
+        "/api/v2/feeds/timeline"
     )
 
     # --- 变量生成区 ---    
@@ -380,6 +383,9 @@ install_cf_tunnel() {
         "/api/client/v4/update"
         "/socket.io/v4/transport"
         "/ws/chat/v3/connect"
+        "/play/hls/live/segment1.ts"
+        "/static/js/main.d2758a0.js"
+        "/api/v2/feeds/timeline"
     )
 
     # --- 2. 生成默认值 ---
