@@ -238,13 +238,30 @@ install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
-    
+
+    # 定义专业伪装路径池
+    local PATH_POOL=(
+        "/api/v1/auth/login"
+        "/api/v2/user/profile"
+        "/api/v3/report/metrics"
+        "/assets/data/report"
+        "/assets/logs/upload"
+        "/static/v1/internal/trace"
+        "/cdn-cgi/v2/telemetry"
+        "/api/client/v4/update"
+        "/socket.io/v4/transport"
+        "/ws/chat/v3/connect"
+    )
+
+    # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
-    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
-    local r_alpn="h2,http/1.1"
+    local r_alpn="h2,http/1.1"    
+    # 从池子中随机选取一个默认路径
+    local r_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}    
 
+    # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
@@ -263,7 +280,8 @@ install_vless_direct() {
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
     [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
-
+ 
+    # --- 执行安装区 ---
     echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
     # --- 集成修正部分：确保 acme.sh 安装与路径绝对化 ---
     if [[ ! -f ~/.acme.sh/acme.sh ]]; then
@@ -373,12 +391,28 @@ EOF
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
-    
-    # 生成默认值
+   
+    # --- 1. 定义专业伪装路径池 ---
+    local PATH_POOL=(
+        "/api/v1/auth/login"
+        "/api/v2/user/profile"
+        "/api/v3/report/metrics"
+        "/assets/data/report"
+        "/assets/logs/upload"
+        "/static/v1/internal/trace"
+        "/cdn-cgi/v2/telemetry"
+        "/api/client/v4/update"
+        "/socket.io/v4/transport"
+        "/ws/chat/v3/connect"
+    )
+
+    # --- 2. 生成默认值 ---
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    # 从池子中随机选取一个作为默认路径
+    local r_t_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
     local r_t_port=$((RANDOM % 55535 + 10000))
-    
+
+    # --- 用户输入区 ---    
     echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
     read -p "选择 [1-2]: " t_choice
     
