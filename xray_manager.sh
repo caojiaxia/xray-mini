@@ -248,7 +248,6 @@ install_vless_direct() {
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
     read -p "请输入UUID (回车随机: $r_uuid): " uuid; uuid=${uuid:-$r_uuid}
     read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
-    read -p "请输入伪装域名SNI (回车默认: $domain): " sni; sni=${sni:-$domain}
     read -p "请输入指纹fp (回车随机: $r_fp): " fp; fp=${fp:-$r_fp}
     read -p "请输入ALPN (回车随机: $r_alpn): " alpn; alpn=${alpn:-$r_alpn}
     read -p "请输入自定义节点名称 (默认: Direct_xHTTP): " node_name
@@ -327,10 +326,9 @@ cat <<EOF > $XRAY_CONF_DIRECT
             "xhttpSettings": { 
                 "path": "$path", 
                 "mode": "auto", 
-                "host": "$sni" 
+                "host": "$domain" 
             },
             "tlsSettings": {
-                "serverName": "$sni",
                 "certificates": [{ 
                     "certificateFile": "$CERT_DIR/server.crt", 
                     "keyFile": "$CERT_DIR/server.key" 
