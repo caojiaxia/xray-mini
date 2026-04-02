@@ -215,30 +215,12 @@ install_vless_direct() {
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
     echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
 
-    # 定义专业伪装路径池
-    local PATH_POOL=(
-        "/api/v1/auth/login"
-        "/api/v2/user/profile"
-        "/api/v3/report/metrics"
-        "/assets/data/report"
-        "/assets/logs/upload"
-        "/static/v1/internal/trace"
-        "/cdn-cgi/v2/telemetry"
-        "/api/client/v4/update"
-        "/socket.io/v4/transport"
-        "/ws/chat/v3/connect"
-        "/play/hls/live/segment1.ts"
-        "/static/js/main.d2758a0.js"
-        "/api/v2/feeds/timeline"
-    )
-
     # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
+    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
-    local r_alpn="h2,http/1.1"    
-    # 从池子中随机选取一个默认路径
-    local r_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}    
+    local r_alpn="h2,http/1.1"       
 
     # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
@@ -370,28 +352,10 @@ EOF
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
-   
-    # --- 1. 定义专业伪装路径池 ---
-    local PATH_POOL=(
-        "/api/v1/auth/login"
-        "/api/v2/user/profile"
-        "/api/v3/report/metrics"
-        "/assets/data/report"
-        "/assets/logs/upload"
-        "/static/v1/internal/trace"
-        "/cdn-cgi/v2/telemetry"
-        "/api/client/v4/update"
-        "/socket.io/v4/transport"
-        "/ws/chat/v3/connect"
-        "/play/hls/live/segment1.ts"
-        "/static/js/main.d2758a0.js"
-        "/api/v2/feeds/timeline"
-    )
 
     # --- 2. 生成默认值 ---
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    # 从池子中随机选取一个作为默认路径
-    local r_t_path=${PATH_POOL[$RANDOM % ${#PATH_POOL[@]}]}
+    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_t_port=$((RANDOM % 55535 + 10000))
 
     # --- 用户输入区 ---    
