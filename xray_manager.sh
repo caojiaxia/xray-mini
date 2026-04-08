@@ -25,25 +25,6 @@ CERT_DIR="$XRAY_CONF_DIR/certs"
 CF_BIN="/usr/local/bin/cloudflared"
 CF_LOG="/tmp/cloudflared.log"
 
-# ====================================================
-# [核心兼容层] Alpine (OpenRC) 桥接 Systemctl
-# ====================================================
-if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
-    systemctl() {
-        local action=$1
-        local service=${2%.service} # 过滤掉 .service 后缀
-        case "$action" in
-            start|stop|restart) rc-service "$service" "$action" >/dev/null 2>&1 ;;
-            enable) rc-update add "$service" default >/dev/null 2>&1 ;;
-            disable) rc-update del "$service" default >/dev/null 2>&1 ;;
-            is-active) rc-service "$service" status 2>/dev/null | grep -q "started" ;;
-            daemon-reload) : ;; # OpenRC 不需要重载守护进程
-            list-unit-files) ls /etc/init.d/ ;;
-            *) return 0 ;;
-        esac
-    }
-fi
-
 # --- 自动检测网络能力并设置策略 (小机适配版) ---
 check_network_strategy() {
     echo -e "${BLUE}[进度] 正在探测网络环境...${PLAIN}"
@@ -97,8 +78,6 @@ cleanup_logs() {
     elif command -v yum >/dev/null 2>&1; then
         yum autoremove -y >/dev/null 2>&1
         yum clean all >/dev/null 2>&1
-    elif command -v apk >/dev/null 2>&1; then
-        apk cache clean >/dev/null 2>&1
     fi
 
     # 4. 设置定时任务：每周一凌晨 3 点自动清理一次
@@ -138,83 +117,93 @@ enable_bbr() {
 # --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    if command -v apt >/dev/null 2>&1; then
+    if [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools
-    elif command -v yum >/dev/null 2>&1; then
+    else
         yum install -y curl wget jq socat crontabs openssl tar lsof net-tools
-    elif command -v apk >/dev/null 2>&1; then
-        # Alpine 依赖：gcompat 极其重要(用于运行glibc程序)，e2fsprogs 提供 chattr
-        apk update && apk add curl wget jq socat cronie openssl tar lsof net-tools gcompat bash tzdata e2fsprogs
     fi
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
+    # 【紧急清理内存 & 释放缓存】
     echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
     sync && echo 3 > /proc/sys/vm/drop_caches
 
+    # 【核心修改：暴力清理并重新拉取】
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
+    
+    # 使用官方脚本安装时增加限制，减少解压时的压力
+    # 如果还是断开，建议手动下载二进制文件
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     
+    # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
+        # 防止文件被锁定 (部分 LXC 环境常见)
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
+        
+        # 打印版本信息，确认 xhttp 支持情况
         local xray_ver=$(/usr/local/bin/xray version | head -n 1)
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # 【步骤 2 & 3】：区分 Systemd 与 OpenRC 写入服务
-    if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
-        local SERVICE_FILE="/etc/systemd/system/xray.service"
-        [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
-        
-        if [[ ! -f "$SERVICE_FILE" ]]; then
-            echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
-            cat <<EOF > /etc/systemd/system/xray.service
+    # 【步骤 2】：精准定位服务文件路径
+    local SERVICE_FILE="/etc/systemd/system/xray.service"
+    [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
+
+    # 【步骤 3】：如果官方没生成服务文件，则手动创建 (保持你原有的 Service 结构)
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
+        cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
+Documentation=https://github.com/xtls/xray-core
 After=network.target nss-lookup.target
 
 [Service]
 User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 ExecStart=/usr/local/bin/xray run -confdir /usr/local/etc/xray/
 Restart=on-failure
+RestartPreventExitStatus=23
 LimitNPROC=10000
 LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 EOF
-            SERVICE_FILE="/etc/systemd/system/xray.service"
-        fi
-        
+        SERVICE_FILE="/etc/systemd/system/xray.service"
+    fi
+
+    # 【步骤 4】：修正服务配置 
+    if [[ -f "$SERVICE_FILE" ]]; then
         echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
+        systemctl stop xray >/dev/null 2>&1
+        pkill -9 xray >/dev/null 2>&1
+        
+        # 修正启动命令和运行用户
         sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
         sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+        
+        # 清理可能存在的冲突目录和默认配置
+        rm -rf "${SERVICE_FILE}.d"
+        rm -f /usr/local/etc/xray/config.json
+        
+        # 赋予服务文件权限并重载
         chmod 644 "$SERVICE_FILE"
         systemctl daemon-reload
-    elif command -v rc-service >/dev/null 2>&1; then
-        local OPENRC_FILE="/etc/init.d/xray"
-        echo -e "${YELLOW}[警告] 检测到 Alpine (OpenRC)，正在创建 $OPENRC_FILE ...${PLAIN}"
-        cat <<EOF > "$OPENRC_FILE"
-#!/sbin/openrc-run
-description="Xray Service"
-command="/usr/local/bin/xray"
-command_args="run -confdir /usr/local/etc/xray/"
-command_background="yes"
-pidfile="/run/xray.pid"
-depend() {
-    need net
-}
-EOF
-        chmod +x "$OPENRC_FILE"
-        rc-update add xray default >/dev/null 2>&1
+        echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
+    else
+        echo -e "${RED}[致命错误] 无法定位 Xray 二进制文件或服务文件，安装失败。${PLAIN}"
+        return 1
     fi
-    echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
 }
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
@@ -359,7 +348,7 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel ---
+# --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -434,8 +423,8 @@ EOF
         wget -O $CF_BIN https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x $CF_BIN
     fi
-    
-    # System / OpenRC 守护进程运行 cloudflared
+
+    # Systemd 守护进程运行 cloudflared
     echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
     systemctl stop cloudflared >/dev/null 2>&1
     pkill -9 cloudflared >/dev/null 2>&1
@@ -443,14 +432,14 @@ EOF
 
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
+        # 临时隧道直接在启动命令中加入 --protocol http2
         cf_cmd="tunnel --protocol http2 --url http://localhost:$t_port"
     else
+        # 固定隧道使用 token 运行
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # 兼容处理 systemd 与 OpenRC
-    if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
-        cat <<EOF > /etc/systemd/system/cloudflared.service
+    cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel Service
 After=network.target
@@ -467,22 +456,6 @@ StandardError=file:$CF_LOG
 [Install]
 WantedBy=multi-user.target
 EOF
-    elif command -v rc-service >/dev/null 2>&1; then
-        cat <<EOF > /etc/init.d/cloudflared
-#!/sbin/openrc-run
-description="Cloudflare Tunnel Service"
-command="$CF_BIN"
-command_args="$cf_cmd"
-command_background="yes"
-pidfile="/run/cloudflared.pid"
-output_log="$CF_LOG"
-error_log="$CF_LOG"
-depend() {
-    need net
-}
-EOF
-        chmod +x /etc/init.d/cloudflared
-    fi
 
     systemctl daemon-reload
     systemctl enable cloudflared
@@ -516,181 +489,86 @@ EOF
 # --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
-    
-    # --- 1. 处理直连节点 (VLESS + xhttp + TLS) ---
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
-        local d_name=$(jq -r '.inbounds[0].tag' "$XRAY_CONF_DIRECT")
-        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_DIRECT")
-        local d_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_DIRECT")
-        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_DIRECT")
-        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' "$XRAY_CONF_DIRECT")
-        
-        # 指纹参数
-        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint // "chrome"' "$XRAY_CONF_DIRECT")
-        
-        # ALPN 参数并进行 URL 编码 (将 , 转为 %2C)
-        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' "$XRAY_CONF_DIRECT")
-        local d_alpn=$(echo "$d_alpn_raw" | sed 's/,/%2C/g')
-        
-        # 兼容性：IPv6 自动加中括号
-        local final_host="$d_host"
-        [[ "$d_host" =~ ":" ]] && [[ ! "$d_host" =~ "[" ]] && final_host="[$d_host]"
-
-        # 路径编码
-        local d_path_enc=$(echo "$d_path" | sed 's/\//%2F/g')
-
+        local d_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_DIRECT)
+        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_DIRECT)
+        local d_port=$(jq -r '.inbounds[0].port' $XRAY_CONF_DIRECT)
+        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
+        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
+        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $XRAY_CONF_DIRECT)
+        local d_alpn=$(echo $d_alpn_raw | sed 's/,/%2C/g')
         echo -e "${GREEN}[节点: $d_name]${PLAIN}"
-        echo -e "  类型: VLESS + xhttp + TLS"
-        echo -e "  地址: ${YELLOW}$d_host${PLAIN}"
-        echo -e "  端口: ${YELLOW}$d_port${PLAIN}"
-        echo -e "  链接: ${CYAN}vless://$d_uuid@$final_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path_enc&fp=$d_fp&alpn=$d_alpn#$d_name${PLAIN}"
+        echo -e "  链接: ${YELLOW}vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$(echo $d_path | sed 's/\//%2F/g')&fp=$d_fp&alpn=$d_alpn#$d_name${PLAIN}"
         echo -e "------------------------------------------------"
     fi
-
-    # --- 2. 处理隧道节点 (CF Tunnel + WS) ---
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
         local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
         local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
-        local t_fingerprint="chrome"
-        local t_alpn="h2%2Chttp%2F1.1"
-
-        # 确保路径以 / 开头，且不重复编码
-        local t_path_fixed=$(echo "$t_path" | sed 's|^/||')
-        
+        local t_params="&fp=chrome&alpn=h2%2Chttp%2F1.1"
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
-            # 【核心修正】补齐了 host=$t_url，并将 path 修正为正确的 / 开头格式
-            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=%2F$t_path_fixed&fp=$t_fingerprint&alpn=$t_alpn#$t_name${PLAIN}"
-        else
-            echo -e "  ${RED}错误: 未找到隧道域名，请检查 cloudflared 是否运行正常${PLAIN}"
+            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')$t_params#$t_name${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
-
-    if [[ ! -f "$XRAY_CONF_DIRECT" ]] && [[ ! -f "$XRAY_CONF_TUNNEL" ]]; then
-        echo -e "${RED}未检测到已部署的节点。${PLAIN}"
-    fi
-
     read -p "按回车键返回菜单..."
 }
-# --- 5.1 仅卸载 Xray (保留 CF Tunnel) ---
-uninstall_xray() {
-    echo -e "${RED}警告：此操作将仅卸载 Xray 核心、直连节点配置及证书。${PLAIN}"
-    read -p "确定要卸载 Xray 吗？[y/n]: " confirm
-    [[ "$confirm" != "y" ]] && return
-
-    echo -e "${YELLOW}正在停止 Xray 服务...${PLAIN}"
-    systemctl stop xray >/dev/null 2>&1
-    systemctl disable xray >/dev/null 2>&1
-    pkill -9 xray >/dev/null 2>&1
-
-    echo -e "${YELLOW}清理 Xray 文件及配置...${PLAIN}"
-    rm -f /etc/systemd/system/xray.service
-    rm -f /etc/init.d/xray  # Alpine 兼容清理
-    systemctl daemon-reload
-    
-    rm -rf /usr/local/etc/xray
-    rm -f /usr/local/bin/xray
-    rm -f /usr/local/share/xray
-    rm -f /var/log/xray/access.log /var/log/xray/error.log
-    
-    echo -e "${GREEN}Xray 及直连节点卸载完成！(若安装了 CF Tunnel，则隧道仍保留运行)${PLAIN}"
-    read -p "按回车键返回..."
-}
-
-# --- 5.2 仅卸载 CF Tunnel (保留 Xray) ---
-uninstall_cf() {
-    echo -e "${RED}警告：此操作将仅卸载 Cloudflare Tunnel 及隧道节点配置。${PLAIN}"
-    read -p "确定要卸载 CF Tunnel 吗？[y/n]: " confirm
-    [[ "$confirm" != "y" ]] && return
-
-    echo -e "${YELLOW}正在停止 Cloudflared 服务...${PLAIN}"
-    systemctl stop cloudflared >/dev/null 2>&1
-    systemctl disable cloudflared >/dev/null 2>&1
-    pkill -9 cloudflared >/dev/null 2>&1
-
-    echo -e "${YELLOW}清理 Cloudflared 文件及配置...${PLAIN}"
-    rm -f /etc/systemd/system/cloudflared.service
-    rm -f /etc/init.d/cloudflared  # Alpine 兼容清理
-    systemctl daemon-reload
-    
-    rm -f /usr/local/bin/cloudflared
-    rm -f /tmp/cloudflared.log
-    rm -f /tmp/cf_tunnel_domain
-    
-    # 顺手清理 Xray 中的隧道专属配置文件并重启 Xray
-    if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
-        rm -f /usr/local/etc/xray/conf_2_tunnel.json
-        systemctl restart xray >/dev/null 2>&1
-    fi
-    
-    echo -e "${GREEN}CF Tunnel 卸载完成！(Xray 直连节点仍正常保留)${PLAIN}"
-    read -p "按回车键返回..."
-}
-
-# --- 5.3 彻底卸载 (原汁原味的格式化) ---
+# --- 5. 彻底卸载  ---
 uninstall_all() {
-    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及服务 ！！！${PLAIN}"
+    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及 Xray/Cloudflared 服务 ！！！${PLAIN}"
     read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
     [[ "$confirm" != "y" ]] && return
 
     echo -e "${YELLOW}[1/5] 正在停止相关服务与进程...${PLAIN}"
+    # 停止服务
     systemctl stop xray cloudflared >/dev/null 2>&1
+    # 强力杀除残留进程
     pkill -9 xray >/dev/null 2>&1
     pkill -9 cloudflared >/dev/null 2>&1
     pkill -f cloudflared >/dev/null 2>&1
 
-    echo -e "${YELLOW}[2/5] 正在移除 Systemd/OpenRC 服务定义...${PLAIN}"
+    echo -e "${YELLOW}[2/5] 正在移除 Systemd 服务定义...${PLAIN}"
     systemctl disable xray cloudflared >/dev/null 2>&1
-    rm -f /etc/systemd/system/xray.service /etc/systemd/system/cloudflared.service
-    rm -f /etc/init.d/xray /etc/init.d/cloudflared  # Alpine 兼容清理
+    rm -f /etc/systemd/system/xray.service
+    rm -f /etc/systemd/system/cloudflared.service
     systemctl daemon-reload
 
     echo -e "${YELLOW}[3/5] 正在清理安装目录与配置...${PLAIN}"
     rm -rf /usr/local/etc/xray
-    rm -f /usr/local/bin/xray /usr/local/bin/cloudflared
+    rm -rf $CERT_DIR
+    rm -f /usr/local/bin/xray
+    rm -f /usr/local/bin/cloudflared
     rm -f $CF_BIN
 
     echo -e "${YELLOW}[4/5] 正在清理临时文件与日志...${PLAIN}"
-    rm -f /tmp/cloudflared.log /tmp/cf_tunnel_domain /var/log/xray_keep_alive.log
+    rm -f /tmp/cloudflared.log
+    rm -f /tmp/cf_tunnel_domain
+    rm -f $CF_LOG
+    rm -f /var/log/xray_keep_alive.log
+    # 彻底清理 acme.sh 文件夹 (如需保留请注释掉下一行)
     rm -rf ~/.acme.sh
 
     echo -e "${YELLOW}[5/5] 正在清理残留依赖与守护任务...${PLAIN}"
+    
+    # 清理自动守护脚本文件
     rm -f /usr/local/bin/xray_keep_alive.sh
+    
+    # 一次性清理 crontab 中的所有相关任务 (acme 和 守护脚本)
+    # 使用 egrep 过滤多个关键词
     crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh" | crontab - >/dev/null 2>&1
+
+    # 清理 ~/.bashrc 中的 acme.sh 环境变量
     if [[ -f ~/.bashrc ]]; then
         sed -i '/acme.sh/d' ~/.bashrc
     fi
 
     echo -e "------------------------------------------------"
-    echo -e "${GREEN}彻底卸载完成！系统已恢复至干净状态。${PLAIN}"
+    echo -e "${GREEN}卸载完成！系统已恢复至干净状态。${PLAIN}"
     echo -e "------------------------------------------------"
     read -p "按回车键返回菜单..."
-}
-
-# --- 5.4 卸载子菜单控制台 ---
-uninstall_menu() {
-    while true; do
-        clear
-        echo -e "
-${CYAN}==========================================
-             ⚙️ 卸载管理菜单
-==========================================${PLAIN}
- ${YELLOW}1.${PLAIN} 仅卸载 Xray (VLESS+xhttp) 及证书
- ${YELLOW}2.${PLAIN} 仅卸载 Cloudflare Tunnel 隧道
- ${RED}3.${PLAIN} 彻底卸载所有组件 (包含脚本数据)
- ${YELLOW}0.${PLAIN} 返回主菜单"
-        read -p "选择 [0-3]: " un_choice
-        case $un_choice in
-            1) uninstall_xray ; break ;;
-            2) uninstall_cf ; break ;;
-            3) uninstall_all ; break ;;
-            0) break ;;
-            *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
-        esac
-    done
 }
 
 # --- [主菜单模块]  ---
@@ -705,7 +583,7 @@ ${CYAN}==========================================
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
- ${YELLOW}5.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
+ ${YELLOW}5.${PLAIN} 卸载脚本及相关组件
  ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
  ${YELLOW}7.${PLAIN} 优化 CF 隧道协议 (HTTP2)
  ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
@@ -716,7 +594,7 @@ ${CYAN}==========================================
             2) install_cf_tunnel ;;
             3) show_node_info ;;
             4) enable_bbr ;; 
-            5) uninstall_menu ;;
+            5) uninstall_all ;;
             6) setup_cron_job ;;
             7) update_cf_tunnel_protocol ;;
             8) cleanup_logs ;;
@@ -730,30 +608,20 @@ ${CYAN}==========================================
 setup_cron_job() {
     echo -e "${YELLOW}正在配置自动维护任务 (每分钟检查一次)...${PLAIN}"
     
+    # 创建守护脚本
     cat <<EOF > /usr/local/bin/xray_keep_alive.sh
 #!/bin/bash
+# 显式声明 PATH，确保 Cron 环境能找到 systemctl 和其他二进制文件
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# OpenRC 兼容层 (Alpine专属)
-if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
-    systemctl() {
-        local action=\$1
-        local service=\${2%.service}
-        case "\$action" in
-            start|stop|restart) rc-service "\$service" "\$action" >/dev/null 2>&1 ;;
-            is-active) rc-service "\$service" status 2>/dev/null | grep -q "started" ;;
-            list-unit-files) ls /etc/init.d/ ;;
-            *) return 0 ;;
-        esac
-    }
-fi
-
+# 检查 Xray 状态，如果不活跃则尝试启动
 if ! systemctl is-active --quiet xray; then
     echo "\$(date): Xray 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
     systemctl start xray
 fi
 
-if systemctl list-unit-files | grep -q cloudflared; then
+# 检查 Cloudflare Tunnel (仅在服务存在时执行)
+if systemctl list-unit-files | grep -q cloudflared.service; then
     if ! systemctl is-active --quiet cloudflared; then
         echo "\$(date): Cloudflared 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
         systemctl start cloudflared
@@ -762,6 +630,7 @@ fi
 EOF
     chmod +x /usr/local/bin/xray_keep_alive.sh
 
+    # 写入 Crontab (采用“先删后加”逻辑，防止多次点击导致任务重复堆积)
     (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
     
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
