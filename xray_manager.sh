@@ -516,34 +516,62 @@ EOF
 # --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
+    
+    # --- 1. 处理直连节点 (VLESS + xhttp + TLS) ---
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
-        local d_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_DIRECT)
-        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_DIRECT)
-        local d_port=$(jq -r '.inbounds[0].port' $XRAY_CONF_DIRECT)
-        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_DIRECT)
-        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' $XRAY_CONF_DIRECT)
-        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' $XRAY_CONF_DIRECT)
-        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' $XRAY_CONF_DIRECT)
-        local d_alpn=$(echo $d_alpn_raw | sed 's/,/%2C/g')
+        local d_name=$(jq -r '.inbounds[0].tag' "$XRAY_CONF_DIRECT")
+        local d_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_DIRECT")
+        local d_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_DIRECT")
+        local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_DIRECT")
+        local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' "$XRAY_CONF_DIRECT")
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' "$XRAY_CONF_DIRECT")
+        
+        # 处理 ALPN 编码
+        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' "$XRAY_CONF_DIRECT")
+        local d_alpn=$(echo "$d_alpn_raw" | sed 's/,/%2C/g')
+        
+        # 检测是否为 IPv6 地址并添加中括号
+        local final_host="$d_host"
+        if [[ "$d_host" =~ ":" ]] && [[ ! "$d_host" =~ "[" ]]; then
+            final_host="[$d_host]"
+        fi
+
+        # 处理路径编码
+        local d_path_enc=$(echo "$d_path" | sed 's/\//%2F/g')
+
         echo -e "${GREEN}[节点: $d_name]${PLAIN}"
-        echo -e "  链接: ${YELLOW}vless://$d_uuid@$d_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$(echo $d_path | sed 's/\//%2F/g')&fp=$d_fp&alpn=$d_alpn#$d_name${PLAIN}"
+        echo -e "  类型: VLESS + xhttp + TLS"
+        echo -e "  地址: ${YELLOW}$d_host${PLAIN}"
+        echo -e "  端口: ${YELLOW}$d_port${PLAIN}"
+        echo -e "  链接: ${CYAN}vless://$d_uuid@$final_host:$d_port?security=tls&sni=$d_host&type=xhttp&mode=auto&path=$d_path_enc&fp=$d_fp&alpn=$d_alpn#$d_name${PLAIN}"
         echo -e "------------------------------------------------"
     fi
+
+    # --- 2. 处理隧道节点 (CF Tunnel + WS) ---
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
-        local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
-        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
-        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
+        local t_name=$(jq -r '.inbounds[0].tag' "$XRAY_CONF_TUNNEL")
+        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_TUNNEL")
+        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' "$XRAY_CONF_TUNNEL")
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
-        local t_fingerprint="chrome"
-        local t_alpn="h2%2Chttp%2F1.1"
+        
+        # 隧道通常走域名，无需处理 IPv6 中括号，但需要处理路径编码
+        local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
+
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
-            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')&fp=$t_fingerprint&alpn=$t_alpn#$t_name${PLAIN}"
+            echo -e "  类型: VLESS + WS + CF Tunnel"
+            echo -e "  域名: ${YELLOW}$t_url${PLAIN}"
+            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$t_path_enc#$t_name${PLAIN}"
         else
-            echo -e "  ${RED}错误: 未找到隧道域名，请检查 cloudflared 是否运行正常${PLAIN}"
+            echo -e "  ${RED}状态: 隧道尚未启动或域名抓取失败${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
+
+    if [[ ! -f "$XRAY_CONF_DIRECT" ]] && [[ ! -f "$XRAY_CONF_TUNNEL" ]]; then
+        echo -e "${RED}未检测到已部署的节点。${PLAIN}"
+    fi
+
     read -p "按回车键返回菜单..."
 }
 # --- 5.1 仅卸载 Xray (保留 CF Tunnel) ---
