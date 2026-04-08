@@ -507,10 +507,13 @@ show_node_info() {
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
         local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
-        local t_params="&fp=chrome&alpn=h2%2Chttp%2F1.1"
+        local t_fingerprint="chrome"
+        local t_alpn="h2%2Chttp%2F1.1"
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
-            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')#$t_name${PLAIN}"
+            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$(echo $t_path | sed 's/\//%2F/g')&fp=$t_fingerprint&alpn=$t_alpn#$t_name${PLAIN}"
+        else
+            echo -e "  ${RED}错误: 未找到隧道域名，请检查 cloudflared 是否运行正常${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
