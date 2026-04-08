@@ -359,7 +359,7 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
+# --- 3. 安装 CF Tunnel ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -549,27 +549,22 @@ show_node_info() {
 
     # --- 2. 处理隧道节点 (CF Tunnel + WS) ---
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
-        local t_name=$(jq -r '.inbounds[0].tag' "$XRAY_CONF_TUNNEL")
-        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_TUNNEL")
-        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' "$XRAY_CONF_TUNNEL")
+        local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
+        local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
+        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
-        
-        # 路径编码
-        local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-
-        # 隧道节点 TLS 参数
-        # 虽然服务端是 security:none，但客户端连接 CF 边缘必须用 TLS
-        local t_fp="chrome"
+        local t_fingerprint="chrome"
         local t_alpn="h2%2Chttp%2F1.1"
 
+        # 确保路径以 / 开头，且不重复编码
+        local t_path_fixed=$(echo "$t_path" | sed 's|^/||')
+        
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
-            echo -e "  类型: VLESS + WS + CF Tunnel"
-            echo -e "  域名: ${YELLOW}$t_url${PLAIN}"
-            # 增加 host, fp, alpn 参数。CF 隧道必须显式指定 host 才能正常握手
-            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=$t_fp&alpn=$t_alpn#$t_name${PLAIN}"
+            # 【核心修正】补齐了 host=$t_url，并将 path 修正为正确的 / 开头格式
+            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=%2F$t_path_fixed&fp=$t_fingerprint&alpn=$t_alpn#$t_name${PLAIN}"
         else
-            echo -e "  ${RED}状态: 隧道尚未启动或域名抓取失败${PLAIN}"
+            echo -e "  ${RED}错误: 未找到隧道域名，请检查 cloudflared 是否运行正常${PLAIN}"
         fi
         echo -e "------------------------------------------------"
     fi
