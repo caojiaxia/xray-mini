@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>万岳归宗 | 影像空间</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;700&family=Noto+Sans+SC:wght@300;400&display=swap" rel="stylesheet">
+    <style>
+        .font-serif { font-family: 'Noto Serif SC', serif; }
+        .font-sans { font-family: 'Noto Sans SC', sans-serif; }
+
+        #bg {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=1920'); 
+            background-size: cover;
+            background-position: center;
+            transition: filter 0.8s ease, transform 0.8s ease;
+            z-index: -1;
+        }
+
+        /* 模态框激活时的背景深度效果 */
+        body.is-modal-open #bg {
+            filter: blur(12px) brightness(0.5);
+            transform: scale(1.1);
+        }
+        
+        body.is-modal-open #main-content {
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.5s ease;
+        }
+
+        .modal { transition: opacity 0.5s ease, visibility 0.5s ease; }
+        .modal-inner { transform: translateY(2rem); transition: transform 0.5s ease; }
+        .modal.active .modal-inner { transform: translateY(0); }
+
+        body::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-[#050505] font-sans text-gray-200">
+
+    <div id="bg"></div>
+
+    <nav class="fixed top-0 w-full z-40 bg-black/20 backdrop-blur-xl border-b border-white/5">
+        <div class="max-w-[1600px] mx-auto px-8 h-20 flex justify-between items-center">
+            <div class="flex items-center space-x-4">
+                <div class="w-10 h-10 border border-white/40 rounded-full flex items-center justify-center">
+                    <span class="text-[10px] tracking-tighter font-bold text-white">BGP</span>
+                </div>
+                <span class="text-sm font-bold tracking-[0.4em] font-serif text-white">万岳归宗</span>
+            </div>
+            <div class="hidden md:flex space-x-10 text-[10px] tracking-[0.3em] font-medium uppercase text-gray-400">
+                <a href="#" class="hover:text-white transition">GALLERY</a>
+                <a href="#" class="hover:text-white transition">ARCHIVE</a>
+                <a href="#" class="hover:text-white transition">ABOUT</a>
+            </div>
+        </div>
+    </nav>
+
+    <div id="main-content" class="relative pt-40 pb-32">
+        <header class="max-w-[1600px] mx-auto px-8 mb-24 text-center md:text-left">
+            <h2 class="text-6xl md:text-8xl font-light font-serif text-white leading-tight">
+                万岳归宗<br><span class="text-white/20 italic">Mountain Soul</span>
+            </h2>
+            <p class="mt-8 text-xs text-gray-500 tracking-[0.6em] font-light">拾光而行 · 独立影像归档 1.0</p>
+        </header>
+
+        <main class="max-w-[1600px] mx-auto px-8">
+            <div id="gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-8">
+                </div>
+        </main>
+    </div>
+
+    <div id="info-modal" class="modal fixed inset-0 z-50 invisible opacity-0 flex items-center justify-center p-4 md:p-8 bg-black/60" onclick="closeModalOnOutsideClick(event)">
+        <div class="modal-inner bg-white text-gray-900 max-w-6xl w-full max-h-[90vh] overflow-hidden rounded-sm relative flex flex-col md:flex-row shadow-2xl">
+            <button class="absolute top-6 right-6 text-3xl font-light text-gray-400 hover:text-black z-20" onclick="closeModal()">&times;</button>
+            
+            <div class="md:w-3/5 h-[40vh] md:h-auto overflow-hidden bg-gray-100">
+                <img id="modal-img" src="" class="w-full h-full object-cover transition-opacity duration-700">
+            </div>
+            
+            <div class="md:w-2/5 p-8 md:p-16 flex flex-col justify-center bg-white">
+                <h2 id="modal-title" class="text-3xl font-serif font-light mb-6 tracking-wide"></h2>
+                <div id="modal-desc" class="text-sm leading-loose text-gray-500 font-light space-y-4 mb-10">
+                    </div>
+                <div class="text-[10px] tracking-[0.3em] text-gray-300 border-t pt-8 uppercase font-sans">
+                    Captured by <span class="text-gray-900">BoGe Studio</span><br>
+                    Format: <span id="modal-meta"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. 定义 10 个模块的数据（图片链接、标题、文艺简介、参数）
+        const galleryData = [
+            {
+                title: "念青唐古拉",
+                intro: "<p>经幡在风中吟唱，山脉在云端沉默。这里是距离天空最近的地方，每一口呼吸都带着雪山清冽的味道。</p>",
+                meta: "Phase One XF · 80mm · ISO 100",
+                img: "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=1200",
+                thumb: "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=600"
+            },
+            {
+                title: "阿尔卑斯暮色",
+                intro: "<p>当夕阳的金边勾勒出群山的轮廓，世界陷入了一种神圣的静谧。这不仅是光的艺术，更是大自然对万物的礼赞。</p>",
+                meta: "Leica M11 · 35mm · f/1.4",
+                img: "https://picsum.photos/id/1018/1200/800",
+                thumb: "https://picsum.photos/id/1018/600/800"
+            },
+            {
+                title: "冈仁波齐",
+                intro: "<p>众山之父，万水之源。它静静地矗立在那里，不需要任何语言。朝圣者的脚步在碎石上摩擦，发出细碎而坚定的声响。</p>",
+                meta: "Nikon Z7 II · 70-200mm · f/8",
+                img: "https://images.unsplash.com/photo-1544198365-f5d60b6d8190?q=80&w=1200",
+                thumb: "https://images.unsplash.com/photo-1544198365-f5d60b6d8190?q=80&w=600"
+            },
+            {
+                title: "极北之境",
+                intro: "<p>在冰原之间，蓝色不再是一种颜色，而是一种情绪。那是冷冽到极致后的纯粹，是文明之外的荒野。</p>",
+                meta: "DJI Mavic 3 Pro · 24mm · ISO 200",
+                img: "https://picsum.photos/id/1036/1200/800",
+                thumb: "https://picsum.photos/id/1036/600/800"
+            },
+            {
+                title: "落基山流云",
+                intro: "<p>云海像潮水一样翻涌，淹没了山脊。我们站在孤岛之上，看万岳奔腾。在这种气势面前，人类的烦忧显得如此微不足道。</p>",
+                meta: "Sony A7R5 · 16-35mm · f/11",
+                img: "https://images.unsplash.com/photo-1454496522488-7a8e488e8606?q=80&w=1200",
+                thumb: "https://images.unsplash.com/photo-1454496522488-7a8e488e8606?q=80&w=600"
+            },
+            {
+                title: "富士余晖",
+                intro: "<p>完美的对称，克制的留白。在落日的余晖中，整座山脉被染成胭脂色。这是东方美学中关于‘物哀’最直观的体现。</p>",
+                meta: "Fujifilm GFX100S · 110mm · f/2.0",
+                img: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?q=80&w=1200",
+                thumb: "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?q=80&w=600"
+            },
+            {
+                title: "昆仑之巅",
+                intro: "<p>万山之祖，气势磅礴。这里只有岩石、积雪和烈风。这是属于勇者的领地，也是摄影师梦寐以求的圣殿。</p>",
+                meta: "Hasselblad X2D · 38mm · f/4.0",
+                img: "https://picsum.photos/id/1047/1200/800",
+                thumb: "https://picsum.photos/id/1047/600/800"
+            },
+            {
+                title: "安第斯之魂",
+                intro: "<p>南美的脊梁，延绵不绝。在海拔五千米的地方，阳光变得锐利而透明。这幅影像记录了山脉与阴影交叠的极致几何美感。</p>",
+                meta: "Canon R5 · 50mm · f/1.2",
+                img: "https://images.unsplash.com/photo-1483921020237-2ff51e8e4b22?q=80&w=1200",
+                thumb: "https://images.unsplash.com/photo-1483921020237-2ff51e8e4b22?q=80&w=600"
+            },
+            {
+                title: "梅鲁雪山",
+                intro: "<p>在那道光线降临顶峰的十秒钟里，你仿佛能听到大地的脉搏。这是摄影师等待了七个昼夜才换来的瞬间。</p>",
+                meta: "Sony A1 · 400mm · f/2.8",
+                img: "https://picsum.photos/id/1044/1200/800",
+                thumb: "https://picsum.photos/id/1044/600/800"
+            },
+            {
+                title: "星垂平野",
+                intro: "<p>当夜幕降临，山脉变成了大地的黑色剪影，星河在上空奔流不息。这是宇宙最原始的浪漫，也是人类对未知的终极向往。</p>",
+                meta: "Nikon Z9 · 14-24mm · ISO 3200",
+                img: "https://picsum.photos/id/1050/1200/800", // 绝美的高山星空图
+                thumb: "https://picsum.photos/id/1050/600/800"
+            }
+        ];
+
+        // 2. 渲染首页网格
+        const grid = document.getElementById('gallery-grid');
+        galleryData.forEach((item, index) => {
+            const el = document.createElement('div');
+            el.className = "group cursor-pointer mb-6 animate-fade-in";
+            el.onclick = () => openModal(index);
+            el.innerHTML = `
+                <div class="overflow-hidden rounded-sm aspect-[3/4] bg-neutral-900 relative">
+                    <img src="${item.thumb}" class="w-full h-full object-cover grayscale-[50%] group-hover:grayscale-0 group-hover:scale-105 transition-all duration-1000">
+                    <div class="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-all"></div>
+                </div>
+                <div class="mt-5 border-l border-white/10 pl-4 group-hover:border-white/40 transition-all">
+                    <h3 class="text-[11px] font-bold tracking-widest font-serif text-white/80 uppercase">${item.title}</h3>
+                    <p class="text-[9px] text-gray-500 mt-2 tracking-tighter uppercase font-sans">${item.meta}</p>
+                </div>
+            `;
+            grid.appendChild(el);
+        });
+
+        // 3. 模态框逻辑
+        function openModal(index) {
+            const data = galleryData[index];
+            document.getElementById('modal-img').src = data.img;
+            document.getElementById('modal-title').innerText = data.title;
+            document.getElementById('modal-desc').innerHTML = data.intro;
+            document.getElementById('modal-meta').innerText = data.meta;
+
+            const modal = document.getElementById('info-modal');
+            modal.classList.remove('invisible', 'opacity-0');
+            modal.classList.add('active', 'opacity-100');
+            document.body.classList.add('is-modal-open');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('info-modal');
+            modal.classList.add('invisible', 'opacity-0');
+            modal.classList.remove('active', 'opacity-100');
+            document.body.classList.remove('is-modal-open');
+        }
+
+        function closeModalOnOutsideClick(e) {
+            if (e.target.id === 'info-modal') closeModal();
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+    </script>
+</body>
+</html>
