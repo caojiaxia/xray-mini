@@ -524,19 +524,19 @@ show_node_info() {
         local d_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_DIRECT")
         local d_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_DIRECT")
         local d_host=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' "$XRAY_CONF_DIRECT")
-        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint' "$XRAY_CONF_DIRECT")
         
-        # 处理 ALPN 编码
+        # 指纹参数
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint // "chrome"' "$XRAY_CONF_DIRECT")
+        
+        # ALPN 参数并进行 URL 编码 (将 , 转为 %2C)
         local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' "$XRAY_CONF_DIRECT")
         local d_alpn=$(echo "$d_alpn_raw" | sed 's/,/%2C/g')
         
-        # 检测是否为 IPv6 地址并添加中括号
+        # 兼容性：IPv6 自动加中括号
         local final_host="$d_host"
-        if [[ "$d_host" =~ ":" ]] && [[ ! "$d_host" =~ "[" ]]; then
-            final_host="[$d_host]"
-        fi
+        [[ "$d_host" =~ ":" ]] && [[ ! "$d_host" =~ "[" ]] && final_host="[$d_host]"
 
-        # 处理路径编码
+        # 路径编码
         local d_path_enc=$(echo "$d_path" | sed 's/\//%2F/g')
 
         echo -e "${GREEN}[节点: $d_name]${PLAIN}"
@@ -554,14 +554,20 @@ show_node_info() {
         local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' "$XRAY_CONF_TUNNEL")
         local t_url=$(cat /tmp/cf_tunnel_domain 2>/dev/null)
         
-        # 隧道通常走域名，无需处理 IPv6 中括号，但需要处理路径编码
+        # 路径编码
         local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
+
+        # 隧道节点 TLS 参数
+        # 虽然服务端是 security:none，但客户端连接 CF 边缘必须用 TLS
+        local t_fp="chrome"
+        local t_alpn="h2%2Chttp%2F1.1"
 
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
         if [[ -n "$t_url" ]]; then
             echo -e "  类型: VLESS + WS + CF Tunnel"
             echo -e "  域名: ${YELLOW}$t_url${PLAIN}"
-            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&path=$t_path_enc#$t_name${PLAIN}"
+            # 增加 host, fp, alpn 参数。CF 隧道必须显式指定 host 才能正常握手
+            echo -e "  链接: ${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=$t_fp&alpn=$t_alpn#$t_name${PLAIN}"
         else
             echo -e "  ${RED}状态: 隧道尚未启动或域名抓取失败${PLAIN}"
         fi
