@@ -190,14 +190,14 @@ install_base() {
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # 【步骤 2 & 3】：区分 Systemd 与 OpenRC 写入服务
+    # --- 【重点修正：区分 Systemd 与 OpenRC】 ---
     if [ "$HAS_SYSTEMD" = true ]; then
         local SERVICE_FILE="/etc/systemd/system/xray.service"
         [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
         
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
-        cat <<EOF > /etc/systemd/system/xray.service
+        if [[ ! -f "$SERVICE_FILE" ]]; then
+            echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
+            cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
 After=network.target
@@ -208,15 +208,15 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable --now xray
-    else
-        
-        echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
-        sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
-        sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
-        chmod 644 "$SERVICE_FILE"
-        systemctl daemon-reload
+            systemctl daemon-reload
+            systemctl enable --now xray
+        else
+            echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
+            sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
+            sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+            chmod 644 "$SERVICE_FILE"
+            systemctl daemon-reload
+        fi # <--- 这里补齐了内部 if 的闭合，解决了 line 220 的 elif 报错
     elif command -v rc-service >/dev/null 2>&1; then
         local OPENRC_FILE="/etc/init.d/xray"
         echo -e "${YELLOW}[警告] 检测到 Alpine (OpenRC)，正在创建 $OPENRC_FILE ...${PLAIN}"
