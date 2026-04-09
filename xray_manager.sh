@@ -213,7 +213,6 @@ install_vless_direct() {
     
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
-    echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
 
     # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
