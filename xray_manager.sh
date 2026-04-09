@@ -161,6 +161,8 @@ install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if grep -qi "alpine" /etc/os-release; then
         apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc >/dev/null 2>&1
+        # 强行创建 crontab 目录，防止 acme.sh 报错
+        mkdir -p /var/spool/cron/crontabs
     elif [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools >/dev/null 2>&1
     else
@@ -271,8 +273,6 @@ install_vless_direct() {
 
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
 
-    restart_and_check
- 
 # --- 执行安装区 ---
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
     
@@ -288,6 +288,8 @@ install_vless_direct() {
         read -p "请输入 CF Global API Key: " cf_k
         export CF_Key="$cf_k"
         export CF_Email="$cf_e"
+        # 确保 acme.sh 能在 Alpine 环境下正确保存这些 Key
+        $ACME_BIN --update-account --server letsencrypt
         $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
         # 1. 预先检查端口占用
@@ -316,7 +318,7 @@ install_vless_direct() {
     fi
 
     # 【修复重点】：ALPN 格式化，xhttp 模式下直接处理成 JSON 数组字符串
-    local alpn_json=$(echo "$alpn" | sed 's/,/","/g')
+    local alpn_json=$(echo "$alpn" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
 
@@ -395,6 +397,8 @@ EOF
         /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
         read -p "按回车键返回..."
     fi
+
+    restart_and_check
 }
 
 # --- 3. 安装 CF Tunnel (修正版) ---
