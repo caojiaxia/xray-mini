@@ -428,7 +428,7 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel ---
+# --- 3. 安装 CF Tunnel (修正版) ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
@@ -465,10 +465,10 @@ install_cf_tunnel() {
     # 运行检测
     check_network_strategy
 
-    # 【优化点 1】：删掉 outbounds 部分，仅保留 inbounds 避免逻辑冲突
-    cat <<EOF > $XRAY_CONF_TUNNEL
+    # 【关键修正 1】：删掉重复的 "log" 结构，防止与 conf_1_direct.json 冲突导致合并失败
+    # 【关键修正 2】：监听 127.0.0.1 避免与公网 IP 上的服务竞争
+    cat <<EOF > "$XRAY_CONF_TUNNEL"
 {
-    "log": { "loglevel": "warning" },
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": $t_port, 
@@ -487,27 +487,29 @@ install_cf_tunnel() {
 }
 EOF
 
-    # --- 【优化点 2：对齐直连模块的重启与校验逻辑】 ---
+    # --- 【关键修正 3：强化重启逻辑】 ---
     echo -e "${BLUE}[进度] 正在同步重启服务并校验配置...${PLAIN}"
     
-    # 1. 预校验（防止隧道 JSON 写错导致直连也挂掉）
-    /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    # 低内存环境强制预清理
+    sync && echo 3 > /proc/sys/vm/drop_caches
+    
+    # 强制杀死残留 Xray，确保端口 100% 释放后再校验
+    pkill -9 xray >/dev/null 2>&1
+    sleep 1
+
+    # 执行预校验
+    if ! /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/tmp/xray_test.log 2>&1; then
         echo -e "${RED}[错误] 隧道配置校验失败或与现有配置冲突！${PLAIN}"
-        /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
+        echo -e "${YELLOW}错误原因如下：${PLAIN}"
+        cat /tmp/xray_test.log
         read -p "按回车键返回..."
         return 1
     fi
 
-    # 2. 兼容性重启 Xray
+    # 2. 兼容性启动服务
     if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl stop xray >/dev/null 2>&1
-        pkill -9 xray >/dev/null 2>&1
         systemctl start xray
     else
-        # Alpine/OpenRC 暴力拉起补丁
-        rc-service xray stop >/dev/null 2>&1
-        pkill -9 xray >/dev/null 2>&1
         rc-service xray start >/dev/null 2>&1
         sleep 1
         if ! pgrep -x "xray" > /dev/null; then
@@ -515,26 +517,18 @@ EOF
         fi
     fi
 
-    # 下载与权限
+    # --- 隧道核心 Cloudflared 部分 ---
     [[ -z "$CF_ARCH" ]] && detect_arch
-
     if [[ ! -f $CF_BIN ]]; then
         echo -e "${YELLOW}正在下载 cloudflared ($CF_ARCH)...${PLAIN}"
         wget -O $CF_BIN "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x $CF_BIN
     fi
     
-    # 清理旧进程与日志
-    echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
-    if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl stop cloudflared >/dev/null 2>&1
-    else
-        rc-service cloudflared stop >/dev/null 2>&1
-    fi
+    # 杀掉旧的隧道进程
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    # 命令行参数准备
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --protocol http2 --logfile $CF_LOG --url http://localhost:$t_port"
@@ -542,8 +536,22 @@ EOF
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # 规范化服务写入与启动
-    if grep -qi "alpine" /etc/os-release; then
+    # 写入服务并启动（OpenRC/Systemd）
+    if [ "$HAS_SYSTEMD" = true ]; then
+        cat <<EOF > /etc/systemd/system/cloudflared.service
+[Unit]
+Description=Cloudflare Tunnel Service
+After=network.target
+[Service]
+ExecStart=$CF_BIN $cf_cmd
+Restart=always
+User=root
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now cloudflared
+    elif grep -qi "alpine" /etc/os-release; then
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
 command="$CF_BIN"
@@ -554,25 +562,9 @@ EOF
         chmod +x /etc/init.d/cloudflared
         rc-update add cloudflared default >/dev/null 2>&1
         rc-service cloudflared restart >/dev/null 2>&1
-    elif [ "$HAS_SYSTEMD" = true ]; then
-        cat <<EOF > /etc/systemd/system/cloudflared.service
-[Unit]
-Description=Cloudflare Tunnel Service
-After=network.target
-
-[Service]
-ExecStart=$CF_BIN $cf_cmd
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable --now cloudflared
     fi
 
-    # 临时域名抓取逻辑
+    # 临时域名抓取
     if [[ "$t_choice" == "1" ]]; then
         echo -e "${YELLOW}正在尝试抓取临时域名 (最长等待 30s)...${PLAIN}"
         for i in {1..30}; do
@@ -587,14 +579,9 @@ EOF
             fi
             sleep 1
         done
-        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请检查日志: $CF_LOG${PLAIN}"
-    else
-        echo -e "${GREEN}固定隧道服务已启动...${PLAIN}"
-        sleep 1
+        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请查看日志: $CF_LOG${PLAIN}"
     fi
     
-    echo -e "${BLUE}所有组件已就绪，正在生成节点信息...${PLAIN}"
-    sleep 2
     show_node_info
 }
 
