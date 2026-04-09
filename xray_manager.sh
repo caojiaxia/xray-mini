@@ -160,9 +160,9 @@ install_base() {
     detect_arch  # 必须先运行检测架构
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if grep -qi "alpine" /etc/os-release; then
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc >/dev/null 2>&1
         # 强行创建 crontab 目录，防止 acme.sh 报错
         mkdir -p /var/spool/cron/crontabs
+        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc >/dev/null 2>&1
     elif [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools >/dev/null 2>&1
     else
@@ -181,8 +181,13 @@ install_base() {
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
+    # 安装前确保目录干净且无锁定
+    chattr -i /usr/local/bin/xray >/dev/null 2>&1
+    rm -rf /usr/local/bin/xray
+    
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    # 使用官方推荐的参数确保覆盖安装
+    curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- installl
     
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
@@ -360,7 +365,13 @@ EOF
     echo -e "${BLUE}[进度] 正在重启 Xray 服务并校验配置...${PLAIN}"
     
     # 1. 预校验配置语法
-    /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/dev/null 2>&1
+    if [[ -f /usr/local/bin/xray ]]; then
+        /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/dev/null 2>&1
+    else
+        echo -e "${RED}错误: 未检测到 Xray 核心文件，请重新执行安装。${PLAIN}"
+        return 1
+    fi
+    
     if [ $? -ne 0 ]; then
         echo -e "${RED}[错误] 配置文件语法校验失败！${PLAIN}"
         /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
@@ -397,8 +408,6 @@ EOF
         /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
         read -p "按回车键返回..."
     fi
-
-    restart_and_check
 }
 
 # --- 3. 安装 CF Tunnel (修正版) ---
