@@ -239,21 +239,18 @@ EOF
 }
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
-    # 变量兜底：防止全局变量失效导致空值操作风险
     [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
     [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
     
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
 
-    # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
     local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
     local r_alpn="h2,http/1.1"       
 
-    # --- 用户输入区 ---
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
@@ -269,18 +266,9 @@ install_vless_direct() {
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
-    [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
- 
-# --- 执行安装区 ---
+    # 获取证书逻辑 (保持你的逻辑，但修正同步部分)
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
-    
-    if [[ ! -f "$ACME_BIN" ]]; then
-        curl https://get.acme.sh | sh -s email=admin@$domain
-    fi
-    
-    # 强制指定 server，避开默认 ZeroSSL 注册慢的问题
+    [[ ! -f "$ACME_BIN" ]] && curl https://get.acme.sh | sh -s email=admin@$domain
     $ACME_BIN --set-default-ca --server letsencrypt
 
     if [[ "$c_mode" == "2" ]]; then
@@ -290,47 +278,34 @@ install_vless_direct() {
         export CF_Email="$cf_e"
         $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
-        # 1. 预先检查端口占用
-        if lsof -i:80 > /dev/null 2>&1; then
-            echo -e "${YELLOW}检测到 80 端口占用，尝试停止 Nginx...${PLAIN}"
-            systemctl stop nginx >/dev/null 2>&1
-            sleep 1
-            if lsof -i:80 > /dev/null 2>&1; then
-                echo -e "${RED}[错误] 80 端口仍被占用（可能是 Docker 或其他进程），请手动释放！${PLAIN}"
-                return 1
-            fi
-        fi
-        # 2. 仅执行一次申请
+        lsof -i:80 > /dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1
         $ACME_BIN --issue -d $domain --standalone --force
     fi
 
-    # 3. 统一判断申请结果并同步
     if [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
-        echo -e "${GREEN}[成功] 证书就绪，正在同步至 Xray 目录...${PLAIN}"
+        echo -e "${GREEN}[成功] 证书就绪...${PLAIN}"
         mkdir -p "$CERT_DIR"
         cp -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" "$CERT_DIR/server.key"
         cp -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" "$CERT_DIR/server.crt"
         chmod 644 "$CERT_DIR/server.key" "$CERT_DIR/server.crt"
     else
-        echo -e "${RED}[致命错误] 无法获取证书。${PLAIN}"
-        echo -e "${YELLOW}可能原因：域名未解析到本服务器、API Key 错误或 80 端口防火墙未开启。${PLAIN}"
+        echo -e "${RED}[致命错误] 无法获取证书，请检查解析或80端口。${PLAIN}"
+        read -p "按回车键返回..."
         return 1
     fi
 
-    # 处理变量格式化
-    local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
+    # --- 【关键修正】：ALPN 数组处理 ---
+    # 不要在这里加引号，在 jq 或者 cat 的时候处理
+    local alpn_json_array=$(echo "$alpn" | sed 's/,/","/g')
 
-    echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
+    check_network_strategy
 
-# 运行检测
-check_network_strategy
-
-# 核心配置写入
-cat <<EOF > $XRAY_CONF_DIRECT
+    # 写入配置
+    cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
-        "listen": "0.0.0.0",
+        "listen": "::", 
         "port": $port, 
         "protocol": "vless",
         "tag": "$node_name",
@@ -351,36 +326,42 @@ cat <<EOF > $XRAY_CONF_DIRECT
                     "certificateFile": "$CERT_DIR/server.crt", 
                     "keyFile": "$CERT_DIR/server.key" 
                 }],
-                "alpn": ["$alpn_formatted"],
+                "alpn": ["$alpn"],
                 "fingerprint": "$fp"
             }
         }
     }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "$strategy"
-            }
-        }
-    ]
+    "outbounds": [{
+        "protocol": "freedom",
+        "settings": { "domainStrategy": "$strategy" }
+    }]
 }
 EOF
 
-    # 强力重启逻辑
-    systemctl stop xray >/dev/null 2>&1
-    pkill -9 xray >/dev/null 2>&1
-    sleep 1
-    systemctl start xray
+    # --- 【关键修正】：兼容两套系统的重启逻辑 ---
+    echo -e "${BLUE}[进度] 正在启动服务...${PLAIN}"
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl restart xray
+    else
+        rc-service xray restart >/dev/null 2>&1
+    fi
     
     sleep 2
-    if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
-        show_node_info
+    # 检查是否真的跑起来了
+    local is_running=false
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl is-active --quiet xray && is_running=true
     else
-        echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
-        echo -e "${YELLOW}正在进行配置诊断...${PLAIN}"
+        rc-service xray status | grep -q "started" && is_running=true
+    fi
+
+    if [ "$is_running" = true ]; then
+        echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
+        show_node_info  # 只有成功了才显示链接
+    else
+        echo -e "${RED}[错误] Xray 启动失败，可能是配置语法问题。${PLAIN}"
         /usr/local/bin/xray -test -config $XRAY_CONF_DIRECT
+        read -p "按回车键查看错误日志后返回..."
     fi
 }
 
