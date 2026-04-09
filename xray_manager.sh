@@ -246,6 +246,16 @@ install_vless_direct() {
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
 
+    # 核心补完逻辑 (解决 No such file)
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        echo -e "${YELLOW}检测到核心丢失，正在自动补全...${PLAIN}"
+        local temp_arch="64"
+        [[ "$(uname -m)" == "aarch64" ]] && temp_arch="arm64-v8a"
+        wget -qO /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${temp_arch}.zip"
+        unzip -o /tmp/xray.zip xray -d /usr/local/bin/ && chmod +x /usr/local/bin/xray
+        rm -f /tmp/xray.zip
+    fi
+    
     # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
@@ -288,10 +298,7 @@ install_vless_direct() {
         fi
     fi
 
-    # 只有 systemd 系统才执行 systemctl 重载
-    if [ "$HAS_SYSTEMD" = true ]; then
-        rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
-    fi
+    restart_and_check
  
 # --- 执行安装区 ---
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
@@ -343,45 +350,34 @@ install_vless_direct() {
 # 运行检测
 check_network_strategy
 
-# 核心配置写入 (修正 listen 为双栈支持，修正 ALPN 引号错误)
-cat <<EOF > $XRAY_CONF_DIRECT
+# 写入全局配置（仅当不存在时）
+    if [[ ! -f "$XRAY_CONF_DIR/conf_0_core.json" ]]; then
+        cat <<EOF > "$XRAY_CONF_DIR/conf_0_core.json"
 {
     "log": { "loglevel": "warning" },
+    "outbounds": [{ "protocol": "freedom", "settings": { "domainStrategy": "$strategy" } }]
+}
+EOF
+    fi
+
+    # 写入直连分片
+    cat <<EOF > "$XRAY_CONF_DIR/conf_1_direct.json"
+{
     "inbounds": [{
         "listen": "::",
         "port": $port, 
         "protocol": "vless",
         "tag": "$node_name",
-        "settings": { 
-            "clients": [{"id": "$uuid"}], 
-            "decryption": "none" 
-        },
+        "settings": { "clients": [{"id": "$uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "xhttp", 
-            "security": "tls",
-            "xhttpSettings": { 
-                "path": "$path", 
-                "mode": "auto", 
-                "host": "$domain" 
-            },
+            "network": "xhttp", "security": "tls",
+            "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
             "tlsSettings": {
-                "certificates": [{ 
-                    "certificateFile": "$CERT_DIR/server.crt", 
-                    "keyFile": "$CERT_DIR/server.key" 
-                }],
-                "alpn": ["$alpn_json"],
-                "fingerprint": "$fp"
+                "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
+                "alpn": ["$alpn_json"], "fingerprint": "$fp"
             }
         }
-    }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "$strategy"
-            }
-        }
-    ]
+    }]
 }
 EOF
 
@@ -465,22 +461,17 @@ install_cf_tunnel() {
     # 运行检测
     check_network_strategy
 
-    # 【关键修正 1】：删掉重复的 "log" 结构，防止与 conf_1_direct.json 冲突导致合并失败
-    # 【关键修正 2】：监听 127.0.0.1 避免与公网 IP 上的服务竞争
-    cat <<EOF > "$XRAY_CONF_TUNNEL"
+    # 写入隧道分片配置
+    cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": $t_port, 
         "protocol": "vless",
-        "tag": "$t_node_name",
-        "settings": { 
-            "clients": [{"id": "$t_uuid"}], 
-            "decryption": "none" 
-        },
+        "tag": "CF_Tunnel",
+        "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "ws", 
-            "security": "none",
+            "network": "ws", "security": "none",
             "wsSettings": { "path": "$t_path" }
         }
     }]
@@ -506,17 +497,8 @@ EOF
         return 1
     fi
 
-    # 2. 兼容性启动服务
-    if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl start xray
-    else
-        rc-service xray start >/dev/null 2>&1
-        sleep 1
-        if ! pgrep -x "xray" > /dev/null; then
-            nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
-        fi
-    fi
-
+    restart_and_check
+    
     # --- 隧道核心 Cloudflared 部分 ---
     [[ -z "$CF_ARCH" ]] && detect_arch
     if [[ ! -f $CF_BIN ]]; then
@@ -583,6 +565,50 @@ EOF
     fi
     
     show_node_info
+    
+    echo -e "${GREEN}[成功] 双协议共存已就绪。${PLAIN}"
+}
+
+# 统一重启与冲突校验函数
+restart_and_check() {
+    echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
+    
+    # 1. 暴力清理：解决端口占用和内存假死
+    sync
+    pkill -9 xray >/dev/null 2>&1
+    pkill -9 cloudflared >/dev/null 2>&1
+    sleep 2 # 内存小，多给 1 秒释放资源
+    
+    # 2. 核心路径兜底
+    [[ ! -f /usr/local/bin/xray ]] && echo -e "${RED}核心丢失!${PLAIN}" && return 1
+
+    # 3. 校验（-confdir 会自动合并目录下所有 .json）
+    # 这里非常关键，如果两个 JSON 有重复的标签(tag)或冲突，这里会直接指出来
+    local test_result=$(/usr/local/bin/xray -test -confdir /usr/local/etc/xray/ 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}[错误] 配置冲突！详细原因如下：${PLAIN}"
+        echo "$test_result"
+        return 1
+    fi
+
+    # 4. 根据系统启动 Xray
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl daemon-reload
+        systemctl restart xray
+    else
+        rc-service xray restart >/dev/null 2>&1 || nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+    fi
+
+    # 5. 启动隧道（如果存在配置）
+    if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
+        if [ "$HAS_SYSTEMD" = true ]; then
+            systemctl restart cloudflared >/dev/null 2>&1
+        else
+            rc-service cloudflared restart >/dev/null 2>&1
+        fi
+    fi
+
+    echo -e "${GREEN}[成功] 所有协议已通过合并校验并尝试启动。${PLAIN}"
 }
 
 # --- 4. 查看当前节点信息与链接  ---
