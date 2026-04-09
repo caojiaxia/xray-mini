@@ -160,7 +160,7 @@ install_base() {
     detect_arch  # 必须先运行检测架构
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if grep -qi "alpine" /etc/os-release; then
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat openrc >/dev/null 2>&1
+        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat openrc >/dev/null 2>&1
     elif [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools >/dev/null 2>&1
     else
@@ -245,16 +245,6 @@ install_vless_direct() {
     
     install_base
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
-
-    # 核心补完逻辑 (解决 No such file)
-    if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${YELLOW}检测到核心丢失，正在自动补全...${PLAIN}"
-        local temp_arch="64"
-        [[ "$(uname -m)" == "aarch64" ]] && temp_arch="arm64-v8a"
-        wget -qO /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${temp_arch}.zip"
-        unzip -o /tmp/xray.zip xray -d /usr/local/bin/ && chmod +x /usr/local/bin/xray
-        rm -f /tmp/xray.zip
-    fi
     
     # --- 变量生成区 ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -355,7 +345,7 @@ check_network_strategy
         cat <<EOF > "$XRAY_CONF_DIR/conf_0_core.json"
 {
     "log": { "loglevel": "warning" },
-    "outbounds": [{ "protocol": "freedom", "settings": { "domainStrategy": "$strategy" } }]
+    "outbounds": [{ "protocol": "freedom", "settings": { "domainStrategy": "AsIs" } }]
 }
 EOF
     fi
