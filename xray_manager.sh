@@ -270,9 +270,25 @@ install_vless_direct() {
     read -p "选择 [1-2]: " c_mode
 
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
-    [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    
-    # 只有 systemd 系统才执行该清理
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        echo -e "${YELLOW}检测到核心缺失且为非 Systemd 系统，正在手动拉取核心...${PLAIN}"
+        # 自动获取架构
+        local temp_arch="64"
+        [[ "$(uname -m)" == "aarch64" ]] && temp_arch="arm64-v8a"
+        
+        wget -qO /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${temp_arch}.zip"
+        if [ $? -eq 0 ]; then
+            unzip -o /tmp/xray.zip xray -d /usr/local/bin/
+            chmod +x /usr/local/bin/xray
+            rm -f /tmp/xray.zip
+            echo -e "${GREEN}核心手动安装成功！${PLAIN}"
+        else
+            echo -e "${RED}下载核心失败，请检查网络。${PLAIN}"
+            return 1
+        fi
+    fi
+
+    # 只有 systemd 系统才执行 systemctl 重载
     if [ "$HAS_SYSTEMD" = true ]; then
         rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
     fi
