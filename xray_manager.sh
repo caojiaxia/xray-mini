@@ -385,35 +385,45 @@ cat <<EOF > $XRAY_CONF_DIRECT
 }
 EOF
 
-    # 【修复重点】：强力重启逻辑 (增加系统兼容性判断)
-    echo -e "${BLUE}[进度] 正在重启 Xray 服务...${PLAIN}"
+    # --- 【优化后的强力重启逻辑】 ---
+    echo -e "${BLUE}[进度] 正在重启 Xray 服务并校验配置...${PLAIN}"
+    
+    # 1. 预校验配置语法
+    /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[错误] 配置文件语法校验失败！${PLAIN}"
+        /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
+        read -p "按回车键返回..."
+        return 1
+    fi
+
+    # 2. 兼容性重启
     if [ "$HAS_SYSTEMD" = true ]; then
         systemctl stop xray >/dev/null 2>&1
         pkill -9 xray >/dev/null 2>&1
         systemctl start xray
     else
+        # Alpine/OpenRC 逻辑，增加 nohup 暴力拉起作为最终兜底
         rc-service xray stop >/dev/null 2>&1
         pkill -9 xray >/dev/null 2>&1
         rc-service xray start >/dev/null 2>&1
+        sleep 1
+        if ! pgrep -x "xray" > /dev/null; then
+            echo -e "${YELLOW}OpenRC 启动失败，尝试使用 nohup 强制拉起...${PLAIN}"
+            nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+        fi
     fi
     
     sleep 2
     
-    # 状态检测逻辑
-    local is_active=false
-    if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl is-active --quiet xray && is_active=true
-    else
-        rc-service xray status | grep -q "started" && is_active=true
-    fi
-
-    if [ "$is_active" = true ]; then
+    # 3. 最终状态检测
+    if pgrep -x "xray" > /dev/null; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
         show_node_info
     else
         echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
         echo -e "${YELLOW}正在进行配置诊断...${PLAIN}"
-        /usr/local/bin/xray -test -config $XRAY_CONF_DIRECT
+        /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
         read -p "按回车键返回..."
     fi
 }
@@ -455,7 +465,7 @@ install_cf_tunnel() {
     # 运行检测
     check_network_strategy
 
-    # 写入 Xray 配置 (集成 IPv6 优先出站策略)
+    # 【优化点 1】：删掉 outbounds 部分，仅保留 inbounds 避免逻辑冲突
     cat <<EOF > $XRAY_CONF_TUNNEL
 {
     "log": { "loglevel": "warning" },
@@ -473,19 +483,37 @@ install_cf_tunnel() {
             "security": "none",
             "wsSettings": { "path": "$t_path" }
         }
-    }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "$strategy"
-            },
-            "tag": "tunnel_out"
-        }
-    ]
+    }]
 }
 EOF
-    systemctl restart xray
+
+    # --- 【优化点 2：对齐直连模块的重启与校验逻辑】 ---
+    echo -e "${BLUE}[进度] 正在同步重启服务并校验配置...${PLAIN}"
+    
+    # 1. 预校验（防止隧道 JSON 写错导致直连也挂掉）
+    /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[错误] 隧道配置校验失败或与现有配置冲突！${PLAIN}"
+        /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
+        read -p "按回车键返回..."
+        return 1
+    fi
+
+    # 2. 兼容性重启 Xray
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl stop xray >/dev/null 2>&1
+        pkill -9 xray >/dev/null 2>&1
+        systemctl start xray
+    else
+        # Alpine/OpenRC 暴力拉起补丁
+        rc-service xray stop >/dev/null 2>&1
+        pkill -9 xray >/dev/null 2>&1
+        rc-service xray start >/dev/null 2>&1
+        sleep 1
+        if ! pgrep -x "xray" > /dev/null; then
+            nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+        fi
+    fi
 
     # 下载与权限
     [[ -z "$CF_ARCH" ]] && detect_arch
@@ -498,11 +526,15 @@ EOF
     
     # 清理旧进程与日志
     echo -e "${BLUE}[进度] 正在配置 cloudflared 服务守护...${PLAIN}"
-    systemctl stop cloudflared >/dev/null 2>&1
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl stop cloudflared >/dev/null 2>&1
+    else
+        rc-service cloudflared stop >/dev/null 2>&1
+    fi
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    # 增加 --logfile 参数，确保临时隧道域名能被抓取
+    # 命令行参数准备
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --protocol http2 --logfile $CF_LOG --url http://localhost:$t_port"
@@ -510,7 +542,7 @@ EOF
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # 规范化服务写入与启动逻辑（拒绝重复执行）
+    # 规范化服务写入与启动
     if grep -qi "alpine" /etc/os-release; then
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
@@ -549,7 +581,6 @@ EOF
                 tmp_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
                 if [[ -n "$tmp_domain" ]]; then
                     echo -e "\n${GREEN}抓取成功！域名: $tmp_domain${PLAIN}"
-                    # 改为持久化存储，避免重启丢失
                     echo "$tmp_domain" > /usr/local/etc/xray/cf_tunnel_domain
                     break
                 fi
