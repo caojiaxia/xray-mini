@@ -160,7 +160,7 @@ install_base() {
     detect_arch  # 必须先运行检测架构
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     if grep -qi "alpine" /etc/os-release; then
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat openrc >/dev/null 2>&1
+        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc >/dev/null 2>&1
     elif [[ -f /usr/bin/apt ]]; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools >/dev/null 2>&1
     else
@@ -270,23 +270,6 @@ install_vless_direct() {
     read -p "选择 [1-2]: " c_mode
 
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
-    if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${YELLOW}检测到核心缺失且为非 Systemd 系统，正在手动拉取核心...${PLAIN}"
-        # 自动获取架构
-        local temp_arch="64"
-        [[ "$(uname -m)" == "aarch64" ]] && temp_arch="arm64-v8a"
-        
-        wget -qO /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${temp_arch}.zip"
-        if [ $? -eq 0 ]; then
-            unzip -o /tmp/xray.zip xray -d /usr/local/bin/
-            chmod +x /usr/local/bin/xray
-            rm -f /tmp/xray.zip
-            echo -e "${GREEN}核心手动安装成功！${PLAIN}"
-        else
-            echo -e "${RED}下载核心失败，请检查网络。${PLAIN}"
-            return 1
-        fi
-    fi
 
     restart_and_check
  
@@ -364,7 +347,7 @@ EOF
             "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
             "tlsSettings": {
                 "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
-                "alpn": ["$alpn_json"], "fingerprint": "$fp"
+                "alpn": [$alpn_json], "fingerprint": "$fp"
             }
         }
     }]
