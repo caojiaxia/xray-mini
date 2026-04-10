@@ -385,15 +385,15 @@ install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
 
-    # --- 2. 生成默认值 ---
+    # --- 1. 生成默认值 ---
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_t_port=$((RANDOM % 55535 + 10000))
 
-    # --- 用户输入区 ---    
+    # --- 2. 用户输入区 ---
     echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
     read -p "选择 [1-2]: " t_choice
-    
+
     read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
     t_uuid=${t_uuid:-$r_t_uuid}
     read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
@@ -414,25 +414,25 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
-    # 运行检测
+    # 运行网络检测
     check_network_strategy
 
-# 写入隧道分片配置
+    # --- 3. 写入隧道分片配置 ---
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
-        "port": $t_port, 
+        "port": $t_port,
         "protocol": "vless",
         "tag": "$t_node_name",
-        "settings": { 
-            "clients": [{"id": "$t_uuid"}], 
-            "decryption": "none" 
+        "settings": {
+            "clients": [{"id": "$t_uuid"}],
+            "decryption": "none"
         },
         "streamSettings": {
-            "network": "ws", 
+            "network": "ws",
             "security": "none",
-            "wsSettings": { 
+            "wsSettings": {
                 "path": "$t_path"
             }
         }
@@ -440,13 +440,13 @@ install_cf_tunnel() {
 }
 EOF
 
-    # --- 【关键修正 3：强化重启逻辑】 ---
+    # --- 4. 强化重启逻辑与校验 ---
     echo -e "${BLUE}[进度] 正在同步重启服务并校验配置...${PLAIN}"
     
     # 低内存环境强制预清理
     sync && echo 3 > /proc/sys/vm/drop_caches
     
-    # 强制杀死残留 Xray，确保端口 100% 释放后再校验
+    # 强制释放端口
     pkill -9 xray >/dev/null 2>&1
     sleep 1
 
@@ -461,7 +461,7 @@ EOF
 
     restart_and_check
     
-    # --- 隧道核心 Cloudflared 部分 ---
+    # --- 5. 隧道核心 Cloudflared 部分 ---
     [[ -z "$CF_ARCH" ]] && detect_arch
     if [[ ! -f $CF_BIN ]]; then
         echo -e "${YELLOW}正在下载 cloudflared ($CF_ARCH)...${PLAIN}"
@@ -469,50 +469,56 @@ EOF
         chmod +x $CF_BIN
     fi
     
-    # 杀掉旧的隧道进程
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    # 极其重要：即使是默认协议，回源地址也必须带上 Path！
-    # 如果不带 path，Cloudflare 的 WS 握手无法到达 Xray 的监听路径
+    # 构造启动命令：回源地址必须带上 Path 以匹配 Xray 监听
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --logfile $CF_LOG --url http://127.0.0.1:${t_port}${t_path}"
     else
-        # 固定隧道需要在 CF 控制台配置 Public Hostname 时，URL 填 http://127.0.0.1:端口+路径
+        # 固定隧道模式下，请确保 CF 官网控制台配置的 Public Hostname 
+        # 其 URL 填的是 http://127.0.0.1:端口+路径
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # 写入服务并启动
-    if [ "$HAS_SYSTEMD" = true ]; thenn
+    # --- 6. 写入服务并启动 (Systemd / OpenRC) ---
+    if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel Service
 After=network.target
+
 [Service]
 ExecStart=$CF_BIN $cf_cmd
 Restart=always
 User=root
+
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable --now cloudflared
-        elif grep -qi "alpine" /etc/os-release; then
-        
-        cat <<EOF > /etc/init.d/cloudflared       
+    elif grep -qi "alpine" /etc/os-release; then
+        cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
+description="Cloudflare Tunnel Service"
 command="$CF_BIN"
 command_args="$cf_cmd"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
+
+depend() {
+    need net
+    after xray
+}
 EOF
         chmod +x /etc/init.d/cloudflared
         rc-update add cloudflared default >/dev/null 2>&1
         rc-service cloudflared restart >/dev/null 2>&1
     fi
 
-    # 临时域名抓取
+    # --- 7. 临时域名抓取 (限模式 1) ---
     if [[ "$t_choice" == "1" ]]; then
         echo -e "${YELLOW}正在尝试抓取临时域名 (最长等待 30s)...${PLAIN}"
         for i in {1..30}; do
@@ -531,7 +537,6 @@ EOF
     fi
     
     show_node_info
-    
     echo -e "${GREEN}[成功] 双协议共存已就绪。${PLAIN}"
 }
 
