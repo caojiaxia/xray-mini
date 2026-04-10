@@ -417,7 +417,7 @@ install_cf_tunnel() {
     # 运行检测
     check_network_strategy
 
-    # 写入隧道分片配置
+# 写入隧道分片配置
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -427,8 +427,14 @@ install_cf_tunnel() {
         "tag": "CF_Tunnel",
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "ws", "security": "none",
-            "wsSettings": { "path": "$t_path" }
+            "network": "ws",
+            "security": "none",
+            "wsSettings": {
+                "path": "$t_path",
+                "headers": {
+                    "Host": "${t_domain:-$tmp_domain}"
+                }
+            }
         }
     }]
 }
@@ -469,7 +475,7 @@ EOF
 
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        cf_cmd="tunnel --protocol http2 --logfile $CF_LOG --url http://localhost:$t_port"
+        cf_cmd="tunnel --logfile $CF_LOG --url http://127.0.0.1:$t_port"
     else
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
