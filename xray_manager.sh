@@ -499,8 +499,8 @@ EOF
         systemctl daemon-reload
         systemctl enable --now cloudflared
         elif grep -qi "alpine" /etc/os-release; then
-        cat <<EOF > /etc/init.d/cloudflared
         
+        cat <<EOF > /etc/init.d/cloudflared       
 #!/sbin/openrc-run
 command="$CF_BIN"
 command_args="$cf_cmd"
