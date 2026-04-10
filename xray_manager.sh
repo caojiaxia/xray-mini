@@ -418,7 +418,6 @@ install_cf_tunnel() {
     check_network_strategy
 
 # 写入隧道分片配置
-# 写入隧道分片配置
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -474,15 +473,18 @@ EOF
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
+    # 极其重要：即使是默认协议，回源地址也必须带上 Path！
+    # 如果不带 path，Cloudflare 的 WS 握手无法到达 Xray 的监听路径
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        cf_cmd="tunnel --logfile $CF_LOG --url http://127.0.0.1:$t_port"
+        cf_cmd="tunnel --logfile $CF_LOG --url http://127.0.0.1:${t_port}${t_path}"
     else
+        # 固定隧道需要在 CF 控制台配置 Public Hostname 时，URL 填 http://127.0.0.1:端口+路径
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # 写入服务并启动（OpenRC/Systemd）
-    if [ "$HAS_SYSTEMD" = true ]; then
+    # 写入服务并启动
+    if [ "$HAS_SYSTEMD" = true ]; thenn
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel Service
