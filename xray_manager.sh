@@ -380,9 +380,8 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel (OpenAI 建议修复版) ---
+# --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
-    install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS + Host 强校验模式) ---${PLAIN}"
 
     # 1. 变量初始化
@@ -417,16 +416,19 @@ install_cf_tunnel() {
         chmod +x $CF_BIN
     fi
 
-    # 5. 【关键修复】如果是临时隧道，先启动 CF 获取域名
+    # 5. 临时隧道先获取域名
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
     if [[ "$t_choice" == "1" ]]; then
         echo -e "${YELLOW}正在启动临时隧道以获取动态域名...${PLAIN}"
-        # 强制使用 http2 协议，去掉回源 URL 里的 path
-        nohup $CF_BIN tunnel --logfile $CF_LOG --protocol http2 --url http://127.0.0.1:${t_port} > /dev/null 2>&1 &
-        
-        # 轮询日志抓取域名
+
+        nohup $CF_BIN tunnel \
+        --logfile $CF_LOG \
+        --protocol http2 \
+        --url http://127.0.0.1:${t_port} \
+        > /dev/null 2>&1 &
+
         for i in {1..20}; do
             echo -ne "\r抓取域名中: ${i}s/20s..."
             t_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
@@ -440,11 +442,12 @@ install_cf_tunnel() {
             pkill -9 cloudflared
             return 1
         fi
+
         echo -e "${GREEN}[成功] 获得临时域名: $t_domain${PLAIN}"
         echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
     fi
 
-    # 6. 【关键修复】有了域名（t_domain）后，再写入 Xray 配置
+    # 6. 写入 Xray 配置
     echo -e "${BLUE}[进度] 正在写入 Xray 隧道配置并绑定 Host...${PLAIN}"
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
@@ -475,15 +478,15 @@ install_cf_tunnel() {
 }
 EOF
 
-    # 7. 重启 Xray（此时 Host 已就绪）
+    # 7. 重启 Xray
     restart_and_check
 
-    # 8. 持久化 Cloudflared 服务
+    # 8. 持久化 Cloudflared（🔥关键修复在这里）
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
-        cf_cmd="tunnel --logfile $CF_LOG --protocol http2 --url http://127.0.0.1:${t_port}"
+        cf_cmd="tunnel --logfile $CF_LOG --protocol http2 --http-host-header $t_domain --url http://127.0.0.1:${t_port}"
     else
-        cf_cmd="tunnel --no-autoupdate --protocol http2 run --token $t_token"
+        cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header $t_domain run --token $t_token"
     fi
 
     if [ "$HAS_SYSTEMD" = true ]; then
@@ -501,7 +504,6 @@ EOF
         systemctl daemon-reload
         systemctl enable --now cloudflared
     else
-        # Alpine OpenRC
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
 command="$CF_BIN"
