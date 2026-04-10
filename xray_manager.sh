@@ -382,6 +382,7 @@ EOF
 
 # --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
+    install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS + Host 强校验模式) ---${PLAIN}"
 
     # 1. 变量初始化
