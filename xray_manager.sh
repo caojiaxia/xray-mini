@@ -380,118 +380,128 @@ EOF
     fi
 }
 
+# --- 3. 安装 CF Tunnel ---
 install_cf_tunnel() {
-    install_base
-    echo -e "${PURPLE}--- CF Tunnel (终极稳定修复版) ---${PLAIN}"
+    echo -e "${PURPLE}--- CF Tunnel 稳定版 (WS 兼容修复) ---${PLAIN}"
 
+    # ===== 变量 =====
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    local r_path="/$(tr -dc A-Za-z0-9 </dev/urandom | head -c 8)"
     local r_port=$((RANDOM % 55535 + 10000))
+    local t_domain=""
+    local CF_LOG="/tmp/cloudflared.log"
+    local CF_BIN="/usr/local/bin/cloudflared"
 
-    echo "选择隧道类型:"
-    echo "1. 临时隧道（TryCloudflare）"
-    echo "2. 固定隧道（Token）"
-    read -p "选择 [1-2]: " mode
+    # ===== 用户输入 =====
+    echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
+    read -p "选择 [1-2]: " t_choice
 
-    read -p "UUID (回车随机): " uuid
-    uuid=${uuid:-$r_uuid}
+    read -p "UUID (默认随机): " t_uuid
+    t_uuid=${t_uuid:-$r_uuid}
 
-    read -p "路径 (回车随机): " path
-    path=${path:-$r_path}
+    read -p "路径 (默认随机): " t_path
+    t_path=${t_path:-$r_path}
 
-    read -p "节点名称 (默认 CF_Tunnel): " tag
-    tag=${tag:-CF_Tunnel}
+    read -p "节点名称 (默认 CF_Tunnel): " t_name
+    t_name=${t_name:-CF_Tunnel}
 
-    # 下载 cloudflared
-    detect_arch
+    # ===== 下载 cloudflared =====
     if [[ ! -f $CF_BIN ]]; then
         echo -e "${YELLOW}下载 cloudflared...${PLAIN}"
-        wget -O $CF_BIN "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
+        arch=$(uname -m)
+        [[ "$arch" == "x86_64" ]] && arch="amd64"
+        [[ "$arch" == "aarch64" ]] && arch="arm64"
+
+        wget -q -O $CF_BIN "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
         chmod +x $CF_BIN
     fi
 
     pkill -9 cloudflared >/dev/null 2>&1
-    : > "$CF_LOG"
+    : > $CF_LOG
 
-    # =========================
-    # 🟢 临时隧道
-    # =========================
-    if [[ "$mode" == "1" ]]; then
+    # ===== 模式选择 =====
+    if [[ "$t_choice" == "2" ]]; then
+        # ===== 固定隧道 =====
+        read -p "域名: " t_domain
+        read -p "Token: " t_token
 
-        read -p "回源端口 (默认随机 $r_port): " port
-        port=${port:-$r_port}
+        [[ -z "$t_domain" || -z "$t_token" ]] && {
+            echo -e "${RED}输入不能为空${PLAIN}"
+            return
+        }
 
-        echo -e "${YELLOW}启动临时隧道...${PLAIN}"
+        t_port=8080
+
+    else
+        # ===== 临时隧道 =====
+        read -p "回源端口 (默认随机 $r_port): " t_port
+        t_port=${t_port:-$r_port}
+
+        echo -e "${YELLOW}启动临时隧道中...${PLAIN}"
 
         nohup $CF_BIN tunnel \
         --no-autoupdate \
-        --protocol http2 \
+        --protocol http \
+        --edge-ip-version auto \
+        --url http://127.0.0.1:${t_port} \
         --logfile $CF_LOG \
-        --url http://127.0.0.1:$port \
         > /dev/null 2>&1 &
+
+        sleep 2
 
         for i in {1..20}; do
             echo -ne "\r获取域名中 ${i}s..."
-            domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n1 | sed 's/https:\/\///')
-            [[ -n "$domain" ]] && break
+            t_domain=$(grep -oE "https://[-a-z0-9]+\.trycloudflare.com" $CF_LOG | head -n1 | cut -d/ -f3)
+            [[ -n "$t_domain" ]] && break
             sleep 1
         done
         echo ""
 
-        if [[ -z "$domain" ]]; then
-            echo -e "${RED}获取失败！${PLAIN}"
+        if [[ -z "$t_domain" ]]; then
+            echo -e "${RED}获取域名失败${PLAIN}"
             return 1
         fi
 
-        echo "$domain" > /usr/local/etc/xray/cf_tunnel_domain
-        echo -e "${GREEN}临时域名: $domain${PLAIN}"
-
-        cf_cmd="tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:$port"
-
-    # =========================
-    # 🔵 固定隧道
-    # =========================
-    else
-        read -p "请输入域名: " domain
-        read -p "请输入 Token: " token
-
-        port=8080
-        echo "$domain" > /usr/local/etc/xray/cf_tunnel_domain
-
-        cf_cmd="tunnel run --token $token"
+        echo -e "${GREEN}隧道域名: $t_domain${PLAIN}"
     fi
 
-    # =========================
-    # 写入 Xray
-    # =========================
+    # ===== 写入 Xray 配置 =====
     cat <<EOF > /usr/local/etc/xray/conf_2_tunnel.json
 {
   "inbounds": [{
     "listen": "127.0.0.1",
-    "port": $port,
+    "port": $t_port,
     "protocol": "vless",
     "settings": {
-      "clients": [{"id": "$uuid"}],
+      "clients": [{"id": "$t_uuid"}],
       "decryption": "none"
     },
     "streamSettings": {
       "network": "ws",
+      "security": "none",
       "wsSettings": {
-        "path": "$path",
-        "headers": { "Host": "$domain" }
+        "path": "$t_path",
+        "headers": {
+          "Host": "$t_domain"
+        }
       }
     }
   }]
 }
 EOF
 
-    restart_and_check
+    # ===== 启动 Xray（你已有函数就用你自己的）=====
+    pkill -9 xray >/dev/null 2>&1
+    /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
 
-    # =========================
-    # 持久化服务（修复版）
-    # =========================
-    if [ "$HAS_SYSTEMD" = true ]; then
-        cat <<EOF > /etc/systemd/system/cloudflared.service
+    # ===== 持久化 cloudflared =====
+    if [[ "$t_choice" == "1" ]]; then
+        cf_cmd="tunnel --no-autoupdate --protocol http --edge-ip-version auto --http-host-header $t_domain --url http://127.0.0.1:${t_port}"
+    else
+        cf_cmd="tunnel --no-autoupdate --protocol http2 run --token $t_token"
+    fi
+
+    cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel
 After=network.target
@@ -499,19 +509,20 @@ After=network.target
 [Service]
 ExecStart=$CF_BIN $cf_cmd
 Restart=always
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable --now cloudflared
-    else
-        nohup $CF_BIN $cf_cmd > /dev/null 2>&1 &
-    fi
 
-    echo -e "${GREEN}✔ CF Tunnel 已稳定运行${PLAIN}"
-    show_node_info
+    systemctl daemon-reload
+    systemctl enable cloudflared >/dev/null 2>&1
+    systemctl restart cloudflared
+
+    # ===== 输出节点 =====
+    path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
+
+    echo -e "\n${GREEN}部署完成${PLAIN}"
+    echo -e "${CYAN}vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$path_enc#${t_name}${PLAIN}"
 }
 
 # 统一重启与冲突校验函数
