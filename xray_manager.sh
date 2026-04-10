@@ -562,6 +562,7 @@ EOF
     show_node_info
     echo -e "${GREEN}[成功] 双协议共存已就绪。${PLAIN}"
 }
+
 # 统一重启与冲突校验函数
 restart_and_check() {
     echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
