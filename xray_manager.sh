@@ -380,146 +380,138 @@ EOF
     fi
 }
 
-# --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS + Host 强校验模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- CF Tunnel (终极稳定修复版) ---${PLAIN}"
 
-    # 1. 变量初始化
-    local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
-    local r_t_port=$((RANDOM % 55535 + 10000))
-    local t_domain=""
+    local r_uuid=$(cat /proc/sys/kernel/random/uuid)
+    local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    local r_port=$((RANDOM % 55535 + 10000))
 
-    # 2. 用户选择
-    echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
-    read -p "选择 [1-2]: " t_choice
-    read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid; t_uuid=${t_uuid:-$r_t_uuid}
-    read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name; t_node_name=${t_node_name:-"CF_Tunnel"}
-    read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path; t_path=${t_path:-$r_t_path}
+    echo "选择隧道类型:"
+    echo "1. 临时隧道（TryCloudflare）"
+    echo "2. 固定隧道（Token）"
+    read -p "选择 [1-2]: " mode
 
-    # 3. 确定回源端口与域名获取逻辑
-    if [[ "$t_choice" == "2" ]]; then
-        t_port=8080
-        read -p "请输入 CF 绑定域名: " t_domain
-        read -p "请输入 Token: " t_token
-        [[ -z "$t_domain" || -z "$t_token" ]] && { echo -e "${RED}输入不能为空！${PLAIN}"; return 1; }
-        echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
-    else
-        read -p "回源端口 (回车随机: $r_t_port): " t_port; t_port=${t_port:-$r_t_port}
-    fi
+    read -p "UUID (回车随机): " uuid
+    uuid=${uuid:-$r_uuid}
 
-    # 4. 下载 Cloudflared
-    [[ -z "$CF_ARCH" ]] && detect_arch
+    read -p "路径 (回车随机): " path
+    path=${path:-$r_path}
+
+    read -p "节点名称 (默认 CF_Tunnel): " tag
+    tag=${tag:-CF_Tunnel}
+
+    # 下载 cloudflared
+    detect_arch
     if [[ ! -f $CF_BIN ]]; then
-        echo -e "${YELLOW}正在下载 cloudflared...${PLAIN}"
+        echo -e "${YELLOW}下载 cloudflared...${PLAIN}"
         wget -O $CF_BIN "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x $CF_BIN
     fi
 
-    # 5. 临时隧道先获取域名
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    if [[ "$t_choice" == "1" ]]; then
-        echo -e "${YELLOW}正在启动临时隧道以获取动态域名...${PLAIN}"
+    # =========================
+    # 🟢 临时隧道
+    # =========================
+    if [[ "$mode" == "1" ]]; then
+
+        read -p "回源端口 (默认随机 $r_port): " port
+        port=${port:-$r_port}
+
+        echo -e "${YELLOW}启动临时隧道...${PLAIN}"
 
         nohup $CF_BIN tunnel \
-        --logfile $CF_LOG \
+        --no-autoupdate \
         --protocol http2 \
-        --url http://127.0.0.1:${t_port} \
+        --logfile $CF_LOG \
+        --url http://127.0.0.1:$port \
         > /dev/null 2>&1 &
 
         for i in {1..20}; do
-            echo -ne "\r抓取域名中: ${i}s/20s..."
-            t_domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n 1 | sed 's/https:\/\///')
-            [[ -n "$t_domain" ]] && break
+            echo -ne "\r获取域名中 ${i}s..."
+            domain=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" $CF_LOG | head -n1 | sed 's/https:\/\///')
+            [[ -n "$domain" ]] && break
             sleep 1
         done
         echo ""
 
-        if [[ -z "$t_domain" ]]; then
-            echo -e "${RED}[致命错误] 获取临时域名失败，请检查网络！${PLAIN}"
-            pkill -9 cloudflared
+        if [[ -z "$domain" ]]; then
+            echo -e "${RED}获取失败！${PLAIN}"
             return 1
         fi
 
-        echo -e "${GREEN}[成功] 获得临时域名: $t_domain${PLAIN}"
-        echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+        echo "$domain" > /usr/local/etc/xray/cf_tunnel_domain
+        echo -e "${GREEN}临时域名: $domain${PLAIN}"
+
+        cf_cmd="tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:$port"
+
+    # =========================
+    # 🔵 固定隧道
+    # =========================
+    else
+        read -p "请输入域名: " domain
+        read -p "请输入 Token: " token
+
+        port=8080
+        echo "$domain" > /usr/local/etc/xray/cf_tunnel_domain
+
+        cf_cmd="tunnel run --token $token"
     fi
 
-    # 6. 写入 Xray 配置
-    echo -e "${BLUE}[进度] 正在写入 Xray 隧道配置并绑定 Host...${PLAIN}"
-    cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
+    # =========================
+    # 写入 Xray
+    # =========================
+    cat <<EOF > /usr/local/etc/xray/conf_2_tunnel.json
 {
-    "inbounds": [{
-        "listen": "127.0.0.1",
-        "port": $t_port,
-        "protocol": "vless",
-        "tag": "$t_node_name",
-        "settings": {
-            "clients": [{"id": "$t_uuid"}],
-            "decryption": "none"
-        },
-        "streamSettings": {
-            "network": "ws",
-            "security": "none",
-            "wsSettings": {
-                "path": "$t_path",
-                "headers": {
-                    "Host": "$t_domain"
-                }
-            }
-        },
-        "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls"]
-        }
-    }]
+  "inbounds": [{
+    "listen": "127.0.0.1",
+    "port": $port,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "$uuid"}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": {
+        "path": "$path",
+        "headers": { "Host": "$domain" }
+      }
+    }
+  }]
 }
 EOF
 
-    # 7. 重启 Xray
     restart_and_check
 
-    # 8. 持久化 Cloudflared（🔥关键修复在这里）
-    local cf_cmd=""
-    if [[ "$t_choice" == "1" ]]; then
-        cf_cmd="tunnel --logfile $CF_LOG --protocol http2 --http-host-header $t_domain --url http://127.0.0.1:${t_port}"
-    else
-        cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header $t_domain run --token $t_token"
-    fi
-
+    # =========================
+    # 持久化服务（修复版）
+    # =========================
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
-Description=Cloudflare Tunnel Service
+Description=Cloudflare Tunnel
 After=network.target
+
 [Service]
 ExecStart=$CF_BIN $cf_cmd
 Restart=always
-User=root
+RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable --now cloudflared
     else
-        cat <<EOF > /etc/init.d/cloudflared
-#!/sbin/openrc-run
-command="$CF_BIN"
-command_args="$cf_cmd"
-command_background="yes"
-pidfile="/run/cloudflared.pid"
-depend() { need net; }
-EOF
-        chmod +x /etc/init.d/cloudflared
-        rc-update add cloudflared default >/dev/null 2>&1
-        rc-service cloudflared restart >/dev/null 2>&1
+        nohup $CF_BIN $cf_cmd > /dev/null 2>&1 &
     fi
 
+    echo -e "${GREEN}✔ CF Tunnel 已稳定运行${PLAIN}"
     show_node_info
-    echo -e "${GREEN}[成功] 双协议共存已就绪，Host 校验已通过。${PLAIN}"
 }
 
 # 统一重启与冲突校验函数
