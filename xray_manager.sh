@@ -417,7 +417,44 @@ install_cf_tunnel() {
     # 运行网络检测
     check_network_strategy
 
-    # --- 3. 写入隧道分片配置 ---
+# --- 3. 安装 CF Tunnel (修正版) ---
+install_cf_tunnel() {
+    install_base
+    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
+
+    # 1. 生成默认值
+    local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
+    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    local r_t_port=$((RANDOM % 55535 + 10000))
+
+    # 2. 用户输入区
+    echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
+    read -p "选择 [1-2]: " t_choice
+
+    read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
+    t_uuid=${t_uuid:-$r_t_uuid}
+    read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
+    t_node_name=${t_node_name:-"CF_Tunnel"}
+    read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
+    t_path=${t_path:-$r_t_path}
+
+    local t_domain=""
+    if [[ "$t_choice" == "2" ]]; then
+        t_port=8080
+        read -p "请输入 Cloudflare 绑定的域名 (如 tunnel.example.com): " t_domain
+        [[ -z "$t_domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
+        read -p "请输入 Token: " t_token
+        [[ -z "$t_token" ]] && { echo -e "${RED}Token不能为空！${PLAIN}"; return; }
+        echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+    else
+        read -p "回源端口 (回车随机: $r_t_port): " t_port
+        t_port=${t_port:-$r_t_port}
+    fi
+
+    # 运行检测
+    check_network_strategy
+
+    # 3. 写入隧道分片配置
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -440,20 +477,14 @@ install_cf_tunnel() {
 }
 EOF
 
-    # --- 4. 强化重启逻辑与校验 ---
+    # 4. 强化重启逻辑
     echo -e "${BLUE}[进度] 正在同步重启服务并校验配置...${PLAIN}"
-    
-    # 低内存环境强制预清理
     sync && echo 3 > /proc/sys/vm/drop_caches
-    
-    # 强制释放端口
     pkill -9 xray >/dev/null 2>&1
     sleep 1
 
-    # 执行预校验
     if ! /usr/local/bin/xray -test -confdir /usr/local/etc/xray/ >/tmp/xray_test.log 2>&1; then
-        echo -e "${RED}[错误] 隧道配置校验失败或与现有配置冲突！${PLAIN}"
-        echo -e "${YELLOW}错误原因如下：${PLAIN}"
+        echo -e "${RED}[错误] 隧道配置校验失败！${PLAIN}"
         cat /tmp/xray_test.log
         read -p "按回车键返回..."
         return 1
@@ -461,7 +492,7 @@ EOF
 
     restart_and_check
     
-    # --- 5. 隧道核心 Cloudflared 部分 ---
+    # 5. Cloudflared 安装与启动
     [[ -z "$CF_ARCH" ]] && detect_arch
     if [[ ! -f $CF_BIN ]]; then
         echo -e "${YELLOW}正在下载 cloudflared ($CF_ARCH)...${PLAIN}"
@@ -472,28 +503,23 @@ EOF
     pkill -9 cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    # 构造启动命令：回源地址必须带上 Path 以匹配 Xray 监听
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --logfile $CF_LOG --url http://127.0.0.1:${t_port}${t_path}"
     else
-        # 固定隧道模式下，请确保 CF 官网控制台配置的 Public Hostname 
-        # 其 URL 填的是 http://127.0.0.1:端口+路径
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    # --- 6. 写入服务并启动 (Systemd / OpenRC) ---
+    # 6. 核心修复：修复 if 闭合与拼写错误
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel Service
 After=network.target
-
 [Service]
 ExecStart=$CF_BIN $cf_cmd
 Restart=always
 User=root
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -502,15 +528,12 @@ EOF
     elif grep -qi "alpine" /etc/os-release; then
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
-description="Cloudflare Tunnel Service"
 command="$CF_BIN"
 command_args="$cf_cmd"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
-
 depend() {
     need net
-    after xray
 }
 EOF
         chmod +x /etc/init.d/cloudflared
@@ -518,9 +541,9 @@ EOF
         rc-service cloudflared restart >/dev/null 2>&1
     fi
 
-    # --- 7. 临时域名抓取 (限模式 1) ---
+    # 7. 域名抓取
     if [[ "$t_choice" == "1" ]]; then
-        echo -e "${YELLOW}正在尝试抓取临时域名 (最长等待 30s)...${PLAIN}"
+        echo -e "${YELLOW}正在尝试抓取临时域名...${PLAIN}"
         for i in {1..30}; do
             echo -ne "\r正在尝试抓取域名: ${i}s..."
             if [[ -s $CF_LOG ]]; then
@@ -533,13 +556,12 @@ EOF
             fi
             sleep 1
         done
-        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时，请查看日志: $CF_LOG${PLAIN}"
+        [[ -z "$tmp_domain" ]] && echo -e "\n${RED}域名抓取超时${PLAIN}"
     fi
     
     show_node_info
     echo -e "${GREEN}[成功] 双协议共存已就绪。${PLAIN}"
 }
-
 # 统一重启与冲突校验函数
 restart_and_check() {
     echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
