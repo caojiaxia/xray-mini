@@ -418,6 +418,7 @@ install_cf_tunnel() {
     check_network_strategy
 
 # 写入隧道分片配置
+# 写入隧道分片配置
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -425,15 +426,15 @@ install_cf_tunnel() {
         "port": $t_port, 
         "protocol": "vless",
         "tag": "$t_node_name",
-        "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
+        "settings": { 
+            "clients": [{"id": "$t_uuid"}], 
+            "decryption": "none" 
+        },
         "streamSettings": {
-            "network": "ws",
+            "network": "ws", 
             "security": "none",
-            "wsSettings": {
-                "path": "$t_path",
-                "headers": {
-                    "Host": "${t_domain:-$tmp_domain}"
-                }
+            "wsSettings": { 
+                "path": "$t_path"
             }
         }
     }]
