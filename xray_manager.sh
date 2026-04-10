@@ -385,43 +385,6 @@ install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
 
-    # --- 1. 生成默认值 ---
-    local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
-    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
-    local r_t_port=$((RANDOM % 55535 + 10000))
-
-    # --- 2. 用户输入区 ---
-    echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
-    read -p "选择 [1-2]: " t_choice
-
-    read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid
-    t_uuid=${t_uuid:-$r_t_uuid}
-    read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name
-    t_node_name=${t_node_name:-"CF_Tunnel"}
-    read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path
-    t_path=${t_path:-$r_t_path}
-
-    local t_domain=""
-    if [[ "$t_choice" == "2" ]]; then
-        t_port=8080
-        read -p "请输入 Cloudflare 绑定的域名 (如 tunnel.example.com): " t_domain
-        [[ -z "$t_domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
-        read -p "请输入 Token: " t_token
-        [[ -z "$t_token" ]] && { echo -e "${RED}Token不能为空！${PLAIN}"; return; }
-        echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
-    else
-        read -p "回源端口 (回车随机: $r_t_port): " t_port
-        t_port=${t_port:-$r_t_port}
-    fi
-
-    # 运行网络检测
-    check_network_strategy
-
-# --- 3. 安装 CF Tunnel (修正版) ---
-install_cf_tunnel() {
-    install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS 模式) ---${PLAIN}"
-
     # 1. 生成默认值
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
