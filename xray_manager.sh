@@ -424,7 +424,7 @@ install_cf_tunnel() {
         "listen": "127.0.0.1",
         "port": $t_port, 
         "protocol": "vless",
-        "tag": "CF_Tunnel",
+        "tag": "$t_node_name",
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
             "network": "ws",
