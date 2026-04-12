@@ -385,50 +385,55 @@ install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 配置 CF Tunnel (xhttp 模式) ---${PLAIN}"
 
-    # 1. 變數預設 (保底邏輯)
+    # 1. 強制指定全局路徑 (不依賴任何外部變量)
+    local REAL_CF_BIN="/usr/local/bin/cloudflared"
+    local XRAY_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
+
+    # 2. 隨機值預設
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local t_port=8080
 
-    # 2. 交互輸入 (確保自訂名稱和回車保底)
+    # 3. 交互輸入
     echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
     read -p "選擇 [1-2]: " t_choice
-    
     read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
-
-    read -p "請輸入節點名稱 (預設: CF_xhttp_Tunnel): " input_node_name
-    t_node_name=${input_node_name:-"CF_xhttp_Tunnel"}
-
+    read -p "請輸入節點名稱 (預設: CF_xhttp): " input_node_name
+    t_node_name=${input_node_name:-"CF_xhttp"}
     read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
     t_path=${input_path:-$r_t_path}
     [[ "$t_path" != /* ]] && t_path="/$t_path"
+
+    # 4. 強制檢查文件是否存在，不存在則下載
+    if [[ ! -f "$REAL_CF_BIN" ]]; then
+        echo -e "${YELLOW}檢測到 cloudflared 缺失，正在緊急下載...${PLAIN}"
+        [[ -z "$CF_ARCH" ]] && detect_arch
+        wget -O "$REAL_CF_BIN" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
+        chmod +x "$REAL_CF_BIN"
+    fi
 
     local t_domain=""
     local t_token=""
 
     if [[ "$t_choice" == "2" ]]; then
         read -p "請輸入固定域名: " t_domain
-        read -p "請輸入 Tunnel Token: " t_token
+        read -p "請輸入 Token: " t_token
         [[ -z "$t_domain" || -z "$t_token" ]] && return 1
     else
-        echo -e "${YELLOW}正在啟動臨時隧道獲取域名...${PLAIN}"
+        echo -e "${YELLOW}啟動臨時隧道中...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
-        : > "$CF_LOG"
-        nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
+        nohup "$REAL_CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > /tmp/cf_temp.log 2>&1 &
         for i in {1..30}; do
-            echo -ne "\r抓取網域中... ${i}/30s"
-            t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -n 1)
+            t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_temp.log | head -n 1)
             [[ -n "$t_domain" ]] && break
             sleep 1
         done
-        echo ""
-        [[ -z "$t_domain" ]] && { echo -e "${RED}獲取失敗${PLAIN}"; return 1; }
+        [[ -z "$t_domain" ]] && { echo "域名獲取失敗"; return 1; }
     fi
 
-    # 3. 核心：寫入 xhttp 入站 (這是解決 -1 的關鍵)
-    # xhttp 在 Cloudflare 隧道下的表現遠比傳統 WS 穩定
-    cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
+    # 5. 寫入 Xray xhttp 配置
+    cat <<EOF > "$XRAY_CONF"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
@@ -449,11 +454,9 @@ install_cf_tunnel() {
     }]
 }
 EOF
-
-    # 4. 重啟並驗證
     restart_and_check
 
-    # 5. 持久化服務 (確保路徑正確)
+    # 6. 持久化服務 (徹底寫死絕對路徑，不給 OpenRC 報錯的機會)
     local cf_cmd="tunnel --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
 
@@ -462,7 +465,7 @@ EOF
 [Unit]
 After=network.target
 [Service]
-ExecStart=$CF_BIN $cf_cmd
+ExecStart=$REAL_CF_BIN $cf_cmd
 Restart=always
 User=root
 [Install]
@@ -471,27 +474,33 @@ EOF
         systemctl daemon-reload
         [[ "$t_choice" == "2" ]] && systemctl enable --now cloudflared
     else
+        # --- Alpine OpenRC 核心修復區 ---
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
-command="$CF_BIN"
+description="Cloudflare Tunnel"
+# 直接寫死路徑，不使用變量
+command="/usr/local/bin/cloudflared"
 command_args="$cf_cmd"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
-depend() { need net; }
+depend() {
+    need net
+}
 EOF
         chmod +x /etc/init.d/cloudflared
-        [[ "$t_choice" == "2" ]] && { rc-update add cloudflared default; rc-service cloudflared restart; }
+        if [[ "$t_choice" == "2" ]]; then
+            rc-update add cloudflared default >/dev/null 2>&1
+            rc-service cloudflared restart
+        fi
     fi
 
-    # 6. 生成 xhttp 專用鏈接
+    # 7. 生成鏈接
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    # 這裡 type 必須是 xhttp，mode 必須是 packet-up
     local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
-    echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
-    echo -e " 名稱: ${CYAN}${t_node_name}${PLAIN}"
+    echo -e " 狀態: ${YELLOW}xhttp 協議已部署${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     read -p "按回車返回主菜單..."
