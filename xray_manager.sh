@@ -380,56 +380,37 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    # 自動安裝 Nginx (Alpine 環境)
     if ! command -v nginx &> /dev/null; then
-        echo -e "${YELLOW}正在安裝 Nginx...${PLAIN}"
         apk add nginx >/dev/null 2>&1
     fi
     mkdir -p /run/nginx /etc/nginx/http.d
 
-    echo -e "${PURPLE}--- 配置 CF Tunnel (Nginx 反代架構) ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (Nginx 終極版) ---${PLAIN}"
 
-    # 1. 物理路徑與端口
+    # 1. 強制寫死路徑與端口，拒絕 read 丟變量
     local BIN_PATH="/usr/local/bin/cloudflared"
     local XRAY_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
     local NG_CONF="/etc/nginx/http.d/tunnel.conf"
-    local t_port=8080    # Nginx 監聽端口
-    local xray_port=8081 # Xray 內部端口
+    local t_port=8080
+    local xray_port=8081
 
-    # 2. 確保 cloudflared 存在
+    # 2. 自動生成 ID (不問了，直接生成，保證不丟)
+    local t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
+    local t_path="/tunnel$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
+    local t_node_name="CF-NGINX-FIXED"
+
+    # 3. 下載檢測
     if [ ! -f "$BIN_PATH" ]; then
         [[ -z "$CF_ARCH" ]] && detect_arch
         wget -O "$BIN_PATH" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x "$BIN_PATH"
     fi
 
-    # 3. 獲取用戶輸入 (採用最原始、相容性最強的判斷)
-    local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
-    local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
-
-    echo -e "選擇類型: 1.臨時隧道 2.固定隧道"
+    # 4. 只問類型和必要的 Token
+    echo -e "選擇類型: 1.臨時 2.固定"
     read -p "請輸入 [1-2]: " t_choice
-
-    # 強制校驗 UUID，回車絕對不會丟
-    read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
-    if [ -z "$input_uuid" ]; then
-        t_uuid="$r_t_uuid"
-    else
-        t_uuid="$input_uuid"
-    fi
-
-    # 強制校驗路徑
-    read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
-    if [ -z "$input_path" ]; then
-        t_path="$r_t_path"
-    else
-        t_path="$input_path"
-    fi
-    [[ "$t_path" != /* ]] && t_path="/$t_path"
-
     local t_domain=""
     local t_token=""
 
@@ -437,14 +418,14 @@ install_cf_tunnel() {
         read -p "請輸入固定域名: " t_domain
         read -p "請輸入 Token: " t_token
     else
-        echo -e "${YELLOW}正在啟動臨時隧道，請稍候...${PLAIN}"
+        echo -e "${YELLOW}啟動臨時隧道...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
         nohup "$BIN_PATH" tunnel --url http://127.0.0.1:$t_port > /tmp/cf_debug.log 2>&1 &
         sleep 5
         t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_debug.log | head -n 1)
     fi
 
-    # 4. 寫入 Nginx 配置 (借鑒大佬參數：禁用緩衝，專治 -1)
+    # 5. 寫入 Nginx (禁用緩衝，專治斷流)
     cat <<EOF > "$NG_CONF"
 server {
     listen $t_port;
@@ -461,7 +442,7 @@ server {
 }
 EOF
 
-    # 5. 寫入 Xray 配置
+    # 6. 寫入 Xray (鎖定 IPv4 監聽)
     cat <<EOF > "$XRAY_CONF"
 {
     "inbounds": [{
@@ -480,11 +461,12 @@ EOF
 }
 EOF
 
-    # 6. 重啟服務
+    # 7. 重啟服務
     rc-service nginx restart >/dev/null 2>&1
-    restart_and_check
+    # 確保你腳本裡有 restart_and_check 函數，或者直接用下面兩行：
+    rc-service xray restart >/dev/null 2>&1 || /usr/local/bin/xray -config /usr/local/etc/xray/config.json -config /usr/local/etc/xray/conf_2_tunnel.json &
 
-    # 7. OpenRC 守護 (加上 nginx 依賴)
+    # 8. OpenRC 守護
     local cf_args="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
     [ "$t_choice" = "2" ] && cf_args="tunnel --protocol http2 --no-autoupdate run --token $t_token"
 
@@ -501,17 +483,17 @@ EOF
     rc-update add cloudflared default >/dev/null 2>&1
     rc-service cloudflared restart
 
-    # 8. 生成鏈接 (保持 ALPN)
+    # 9. 生成鏈接
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#CF_Tunnel_Gao"
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
     echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
-    echo -e " 提示: 伺服器內部已通過 Nginx 反代加固${PLAIN}"
+    echo -e " 提示: 請刪除 v2rayN 舊節點，導入名字為 $t_node_name 的新節點${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    read -p "按回車返回..."
+    read -p "回車返回主菜單..."
 }
 
 # 统一重启与冲突校验函数
