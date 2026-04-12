@@ -380,120 +380,134 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel  ---
+# --- 3. 安裝 CF Tunnel (Nginx 代理加固版) ---
 install_cf_tunnel() {
+    # 1. 基礎環境與 Nginx 安裝
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel (終極加固版) ---${PLAIN}"
+    if ! command -v nginx &> /dev/null; then
+        echo -e "${YELLOW}正在安裝 Nginx...${PLAIN}"
+        apk add nginx >/dev/null 2>&1
+    fi
+    mkdir -p /run/nginx # Alpine 必要
 
-    # 【1. 環境變量與路徑鎖定】
+    echo -e "${PURPLE}--- 配置 CF Tunnel (Nginx 反代架構) ---${PLAIN}"
+
+    # 2. 路徑與端口鎖定
     local BIN_PATH="/usr/local/bin/cloudflared"
-    local TUNNEL_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
-    local t_port=8080
+    local XRAY_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
+    local NG_CONF="/etc/nginx/http.d/tunnel.conf" # Alpine 標準路徑
+    local t_port=8080    # Nginx 聽的端口
+    local xray_port=8081 # Xray 聽的端口 (內部)
 
-    # 【2. 物理下載：確保文件一定在 /usr/local/bin】
+    # 3. 物理下載檢測
     if [[ ! -f "$BIN_PATH" ]]; then
-        echo -e "${YELLOW}正在物理下載 cloudflared...${PLAIN}"
         [[ -z "$CF_ARCH" ]] && detect_arch
         wget -O "$BIN_PATH" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x "$BIN_PATH"
     fi
 
-    # 【3. 獲取用戶輸入：解決 UUID 丟失問題】
+    # 4. 獲取用戶輸入 (雙重保底)
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     
-    echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
-    read -p "選擇 [1-2]: " t_choice
-    
-    # 這裡使用雙重保底，防止 read 在某些環境下丟失變量
-    read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
+    read -p "選擇類型 [1.臨時 2.固定]: " t_choice
+    read -p "請輸入 UUID (回車隨機): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
-    if [[ -z "$t_uuid" ]]; then t_uuid="$r_t_uuid"; fi
-
-    read -p "請輸入節點名稱 (預設: CF_FIXED): " input_node_name
-    t_node_name=${input_node_name:-"CF_FIXED"}
-    if [[ -z "$t_node_name" ]]; then t_node_name="CF_FIXED"; fi
-
-    read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
+    read -p "請輸入路徑 (回車隨機): " input_path
     t_path=${input_path:-$r_t_path}
-    if [[ -z "$t_path" ]]; then t_path="$r_t_path"; fi
     [[ "$t_path" != /* ]] && t_path="/$t_path"
 
     local t_domain=""
     local t_token=""
 
     if [[ "$t_choice" == "2" ]]; then
-        read -p "請輸入固定域名: " t_domain
-        read -p "請輸入 Token: " t_token
+        read -p "固定域名: " t_domain
+        read -p "Token: " t_token
     else
-        echo -e "${YELLOW}正在獲取臨時域名...${PLAIN}"
+        echo -e "${YELLOW}啟動臨時隧道...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
-        # 使用絕對路徑啟動臨時隧道
         nohup "$BIN_PATH" tunnel --url http://127.0.0.1:$t_port > /tmp/cf_debug.log 2>&1 &
-        for i in {1..30}; do
+        for i in {1..20}; do
             t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_debug.log | head -n 1)
             [[ -n "$t_domain" ]] && break
             sleep 1
         done
     fi
 
-    # 【4. 寫入 Xray 隧道專用配置】
-    # 強制監聽 127.0.0.1 (IPv4)，防止客戶端 IPv6 解析報錯
-    cat <<EOF > "$TUNNEL_CONF"
+    # 5. 寫入 Nginx 配置 (核心：禁用緩衝，適配 XHTTP)
+    cat <<EOF > "$NG_CONF"
+server {
+    listen $t_port;
+    server_name $t_domain;
+    location $t_path {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:$xray_port;
+        proxy_http_version 1.1;
+        
+        # 關鍵參數：解決 -1 斷流
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
+        
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+    # 6. 寫入 Xray 配置 (聽 8081 端口)
+    cat <<EOF > "$XRAY_CONF"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
-        "port": $t_port,
+        "port": $xray_port,
         "protocol": "vless",
-        "tag": "$t_node_name",
         "settings": {
             "clients": [{"id": "$t_uuid"}],
             "decryption": "none"
         },
         "streamSettings": {
             "network": "xhttp",
-            "xhttpSettings": {
-                "path": "$t_path",
-                "mode": "packet-up"
-            }
+            "xhttpSettings": { "path": "$t_path", "mode": "packet-up" }
         }
     }]
 }
 EOF
 
-    # 重啟服務以加載新配置 (假設你腳本裡有這個函數)
-    restart_and_check
+    # 7. 啟動所有服務
+    rc-service nginx restart >/dev/null 2>&1
+    restart_and_check # 重啟 Xray
 
-    # 【5. OpenRC 服務守護：絕對路徑寫死】
+    # 8. OpenRC 守護 CF Tunnel
     local cf_args="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_args="tunnel --protocol http2 --no-autoupdate run --token $t_token"
 
     cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
 description="Cloudflare Tunnel"
-command="/usr/local/bin/cloudflared"
+command="$BIN_PATH"
 command_args="$cf_args"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
-depend() {
-    need net
-}
+depend() { need net nginx; }
 EOF
     chmod +x /etc/init.d/cloudflared
     rc-update add cloudflared default >/dev/null 2>&1
     rc-service cloudflared restart
 
-    # 【6. 生成鏈接：保留 ALPN 與 xhttp 參數】
+    # 9. 生成鏈接
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#$t_node_name"
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#CF_NGINX_XHTTP"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e " 狀態: ${CYAN}Nginx 反代已開啟${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
-    echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
-    echo -e " 提示: 請手動檢查服務狀態: rc-service cloudflared status${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    read -p "按回車返回主菜單..."
+    read -p "按回車返回..."
 }
 
 # 统一重启与冲突校验函数
