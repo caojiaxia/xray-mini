@@ -380,21 +380,32 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel (終極穩健版 - 徹底解決 -1 問題) ---
+# --- 3. 安裝 CF Tunnel---
 install_cf_tunnel() {
+    # 1. 強制定義路徑，防止變量丟失
+    local CF_RUN_BIN="/usr/local/bin/cloudflared"
+    local XRAY_CONF_DIR="/usr/local/etc/xray"
+    
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel (穩健模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (路徑修正版) ---${PLAIN}"
 
-    # 1. 隨機值預設
+    # 2. 隨機值預設
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local t_port=8080
-    netstat -tuln | grep -q ":$t_port " && t_port=$((RANDOM % 50000 + 10000))
 
-    # 2. 獲取域名與模式
+    # 3. 獲取模式
     echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
     read -p "選擇 [1-2]: " t_choice
-    
+
+    # 4. 下載檢測 (確保文件一定存在)
+    if [[ ! -f "$CF_RUN_BIN" ]]; then
+        echo -e "${YELLOW}正在下載 cloudflared...${PLAIN}"
+        [[ -z "$CF_ARCH" ]] && detect_arch
+        wget -q -O "$CF_RUN_BIN" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
+        chmod +x "$CF_RUN_BIN"
+    fi
+
     local t_domain=""
     local t_token=""
 
@@ -403,29 +414,27 @@ install_cf_tunnel() {
         read -p "請輸入 Tunnel Token: " t_token
         [[ -z "$t_domain" || -z "$t_token" ]] && return 1
     else
-        echo -e "${YELLOW}正在獲取臨時域名...${PLAIN}"
+        echo -e "${YELLOW}正在啟動臨時隧道獲取域名...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
-        : > "$CF_LOG"
-        nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
-        for i in {1..35}; do
-            t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -n 1)
+        nohup "$CF_RUN_BIN" tunnel --url "http://127.0.0.1:$t_port" > /tmp/cf_tunnel.log 2>&1 &
+        for i in {1..30}; do
+            t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_tunnel.log | head -n 1)
             [[ -n "$t_domain" ]] && break
             sleep 1
         done
-        [[ -z "$t_domain" ]] && return 1
+        [[ -z "$t_domain" ]] && { echo "域名獲取失敗"; return 1; }
     fi
 
-    # 3. 處理 UUID 與路徑 (確保回車生效)
+    # 5. 處理 UUID 與路徑 (修正回車無效問題)
     read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
     read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
     t_path=${input_path:-$r_t_path}
     [[ "$t_path" != /* ]] && t_path="/$t_path"
-    t_node_name="CF_Tunnel"
 
-    # 4. 核心：重寫 Xray 入站 (移除所有不必要的 Header 匹配)
-    # 大部分 -1 是因為 Xray 在 WS 層試圖校驗 Host，而 CF 轉發時 Header 格式不對
-    cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
+    # 6. 寫入 Xray 配置
+    mkdir -p "$XRAY_CONF_DIR"
+    cat <<EOF > "$XRAY_CONF_DIR/conf_2_tunnel.json"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
@@ -437,16 +446,14 @@ install_cf_tunnel() {
         },
         "streamSettings": {
             "network": "ws",
-            "wsSettings": {
-                "path": "$t_path"
-            }
+            "wsSettings": { "path": "$t_path" }
         }
     }]
 }
 EOF
     restart_and_check
 
-    # 5. 持久化 (優化啟動參數)
+    # 7. 持久化服務 (使用絕對路徑)
     local cf_cmd="tunnel --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
 
@@ -455,30 +462,32 @@ EOF
 [Unit]
 After=network.target
 [Service]
-ExecStart=$CF_BIN $cf_cmd
+ExecStart=$CF_RUN_BIN $cf_cmd
 Restart=always
-ExecStartPre=/usr/bin/pkill -9 cloudflared || true
 User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-        # 臨時隧道不通過 systemd 啟動以防域名變更，直接由剛才的 nohup 接管
-        [[ "$t_choice" == "2" ]] && { systemctl daemon-reload; systemctl enable --now cloudflared; }
+        systemctl daemon-reload
+        [[ "$t_choice" == "2" ]] && systemctl enable --now cloudflared
     else
+        # Alpine OpenRC 模板
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
-command="$CF_BIN"
+description="Cloudflare Tunnel"
+command="$CF_RUN_BIN"
 command_args="$cf_cmd"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
+depend() { need net; }
 EOF
         chmod +x /etc/init.d/cloudflared
         [[ "$t_choice" == "2" ]] && { rc-update add cloudflared default; rc-service cloudflared restart; }
     fi
 
-    # 6. 生成節點 (簡化 ALPN，只保留最通用的)
+    # 8. 輸出
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome#$t_node_name"
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome#CF_Tunnel"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
