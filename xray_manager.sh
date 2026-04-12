@@ -383,33 +383,40 @@ EOF
 # --- 3. 安裝 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel (不影響直連模塊) ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (終極加固版) ---${PLAIN}"
 
-    # 1. 物理路徑硬編碼
+    # 【1. 環境變量與路徑鎖定】
     local BIN_PATH="/usr/local/bin/cloudflared"
-    # 注意：隧道配置獨立存放，不覆蓋直連的 config.json
     local TUNNEL_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
+    local t_port=8080
 
-    # 2. 物理下載
+    # 【2. 物理下載：確保文件一定在 /usr/local/bin】
     if [[ ! -f "$BIN_PATH" ]]; then
-        echo -e "${YELLOW}正在下載物理文件...${PLAIN}"
+        echo -e "${YELLOW}正在物理下載 cloudflared...${PLAIN}"
         [[ -z "$CF_ARCH" ]] && detect_arch
         wget -O "$BIN_PATH" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x "$BIN_PATH"
     fi
 
-    # 3. 獲取用戶輸入
+    # 【3. 獲取用戶輸入：解決 UUID 丟失問題】
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
-    local t_port=8080
-
-    read -p "選擇類型 [1.臨時 2.固定]: " t_choice
-    read -p "UUID (回車隨機): " input_uuid
+    
+    echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
+    read -p "選擇 [1-2]: " t_choice
+    
+    # 這裡使用雙重保底，防止 read 在某些環境下丟失變量
+    read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
-    read -p "節點名稱: " input_node_name
-    t_node_name=${input_node_name:-"CF_Tunnel_Node"}
-    read -p "路徑 (回車隨機): " input_path
+    if [[ -z "$t_uuid" ]]; then t_uuid="$r_t_uuid"; fi
+
+    read -p "請輸入節點名稱 (預設: CF_FIXED): " input_node_name
+    t_node_name=${input_node_name:-"CF_FIXED"}
+    if [[ -z "$t_node_name" ]]; then t_node_name="CF_FIXED"; fi
+
+    read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
     t_path=${input_path:-$r_t_path}
+    if [[ -z "$t_path" ]]; then t_path="$r_t_path"; fi
     [[ "$t_path" != /* ]] && t_path="/$t_path"
 
     local t_domain=""
@@ -419,8 +426,9 @@ install_cf_tunnel() {
         read -p "請輸入固定域名: " t_domain
         read -p "請輸入 Token: " t_token
     else
-        echo -e "${YELLOW}獲取臨時域名...${PLAIN}"
+        echo -e "${YELLOW}正在獲取臨時域名...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
+        # 使用絕對路徑啟動臨時隧道
         nohup "$BIN_PATH" tunnel --url http://127.0.0.1:$t_port > /tmp/cf_debug.log 2>&1 &
         for i in {1..30}; do
             t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_debug.log | head -n 1)
@@ -429,8 +437,8 @@ install_cf_tunnel() {
         done
     fi
 
-    # 4. 寫入隧道專屬配置 (只聽 127.0.0.1，保證隧道穩定)
-    # 這裏不會修改你的直連模塊配置文件！
+    # 【4. 寫入 Xray 隧道專用配置】
+    # 強制監聽 127.0.0.1 (IPv4)，防止客戶端 IPv6 解析報錯
     cat <<EOF > "$TUNNEL_CONF"
 {
     "inbounds": [{
@@ -444,16 +452,19 @@ install_cf_tunnel() {
         },
         "streamSettings": {
             "network": "xhttp",
-            "xhttpSettings": { "path": "$t_path", "mode": "packet-up" }
+            "xhttpSettings": {
+                "path": "$t_path",
+                "mode": "packet-up"
+            }
         }
     }]
 }
 EOF
 
-    # 重啟 Xray，加載所有配置
+    # 重啟服務以加載新配置 (假設你腳本裡有這個函數)
     restart_and_check
 
-    # 5. OpenRC 服務守護
+    # 【5. OpenRC 服務守護：絕對路徑寫死】
     local cf_args="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_args="tunnel --protocol http2 --no-autoupdate run --token $t_token"
 
@@ -464,22 +475,25 @@ command="/usr/local/bin/cloudflared"
 command_args="$cf_args"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
-depend() { need net; }
+depend() {
+    need net
+}
 EOF
     chmod +x /etc/init.d/cloudflared
     rc-update add cloudflared default >/dev/null 2>&1
     rc-service cloudflared restart
 
-    # 6. 生成鏈接 (帶 ALPN)
+    # 【6. 生成鏈接：保留 ALPN 與 xhttp 參數】
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
     local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
+    echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
-    echo -e " 提示: 直連模塊的 IPv6 優先級不受此配置影響${PLAIN}"
+    echo -e " 提示: 請手動檢查服務狀態: rc-service cloudflared status${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    read -p "按回車返回..."
+    read -p "按回車返回主菜單..."
 }
 
 # 统一重启与冲突校验函数
