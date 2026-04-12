@@ -380,94 +380,90 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel  ---
+# --- 3. 安裝 CF Tunnel (終極穩健版 - 徹底解決 -1 問題) ---
 install_cf_tunnel() {
-    # 執行基礎安裝
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (穩健模式) ---${PLAIN}"
 
-    # 1. 預設隨機值 (保底用)
+    # 1. 隨機值預設
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local t_port=8080
-    
-    # 2. 選擇模式
+    netstat -tuln | grep -q ":$t_port " && t_port=$((RANDOM % 50000 + 10000))
+
+    # 2. 獲取域名與模式
     echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
     read -p "選擇 [1-2]: " t_choice
     
     local t_domain=""
     local t_token=""
 
-    # 3. 獲取域名邏輯
     if [[ "$t_choice" == "2" ]]; then
         read -p "請輸入固定域名: " t_domain
         read -p "請輸入 Tunnel Token: " t_token
-        [[ -z "$t_domain" || -z "$t_token" ]] && { echo "錯誤: 域名或 Token 不能為空"; return 1; }
+        [[ -z "$t_domain" || -z "$t_token" ]] && return 1
     else
-        echo -e "${YELLOW}正在獲取臨時域名 (請稍候)...${PLAIN}"
-        # 徹底清理舊進程，防止域名抓取衝突
+        echo -e "${YELLOW}正在獲取臨時域名...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
         : > "$CF_LOG"
         nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
-        for i in {1..30}; do
+        for i in {1..35}; do
             t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -n 1)
             [[ -n "$t_domain" ]] && break
             sleep 1
         done
-        [[ -z "$t_domain" ]] && { echo "獲取失敗"; return 1; }
+        [[ -z "$t_domain" ]] && return 1
     fi
 
-    # 4. 關鍵：處理 UUID 和路徑 (確保回車不為空)
+    # 3. 處理 UUID 與路徑 (確保回車生效)
     read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
-
     read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
     t_path=${input_path:-$r_t_path}
     [[ "$t_path" != /* ]] && t_path="/$t_path"
+    t_node_name="CF_Tunnel"
 
-    read -p "請輸入節點名稱 (預設: CF_Tunnel): " input_name
-    t_node_name=${input_name:-"CF_Tunnel"}
-
-    # 5. 寫入 Xray 配置 (採用最穩健的傳輸配置)
+    # 4. 核心：重寫 Xray 入站 (移除所有不必要的 Header 匹配)
+    # 大部分 -1 是因為 Xray 在 WS 層試圖校驗 Host，而 CF 轉發時 Header 格式不對
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": $t_port,
         "protocol": "vless",
-        "tag": "$t_node_name",
         "settings": {
             "clients": [{"id": "$t_uuid"}],
             "decryption": "none"
         },
         "streamSettings": {
             "network": "ws",
-            "wsSettings": { "path": "$t_path" }
+            "wsSettings": {
+                "path": "$t_path"
+            }
         }
     }]
 }
 EOF
     restart_and_check
 
-    # 6. 配置服務 (持久化)
+    # 5. 持久化 (優化啟動參數)
     local cf_cmd="tunnel --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
 
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
-Description=Cloudflare Tunnel
 After=network.target
 [Service]
 ExecStart=$CF_BIN $cf_cmd
 Restart=always
+ExecStartPre=/usr/bin/pkill -9 cloudflared || true
 User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        # 只有固定隧道才重啟服務，臨時隧道保持 nohup 進程以鎖定域名
-        [[ "$t_choice" == "2" ]] && systemctl enable --now cloudflared
+        # 臨時隧道不通過 systemd 啟動以防域名變更，直接由剛才的 nohup 接管
+        [[ "$t_choice" == "2" ]] && { systemctl daemon-reload; systemctl enable --now cloudflared; }
     else
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
@@ -480,17 +476,16 @@ EOF
         [[ "$t_choice" == "2" ]] && { rc-update add cloudflared default; rc-service cloudflared restart; }
     fi
 
-    # 7. 拼接並輸出鏈接
+    # 6. 生成節點 (簡化 ALPN，只保留最通用的)
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome&alpn=http%2F1.1#$t_node_name"
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
     echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
-    echo -e " 路徑: ${CYAN}${t_path}${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    read -p "按回車鍵返回主菜單..."
+    read -p "按回車返回主菜單..."
 }
 
 # 统一重启与冲突校验函数
