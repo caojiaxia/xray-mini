@@ -380,12 +380,13 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel (完整修復版 - 2026 更新) ---
+# --- 3. 安裝 CF Tunnel ---
 install_cf_tunnel() {
     install_base
     echo -e "${PURPLE}--- 開始配置 CF Tunnel (VLESS + WS 透明轉發) ---${PLAIN}"
 
     # 1. 變數初始化與安全生成
+    # 優先從系統獲取 UUID，失敗則生成固定格式 UUID
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_t_port=$((RANDOM % 55535 + 10000))
@@ -405,6 +406,7 @@ install_cf_tunnel() {
 
     read -p "請輸入隧道路徑 (回車隨機: $r_t_path): " t_path
     t_path=${t_path:-$r_t_path}
+    # 確保路徑以 / 開頭
     [[ "$t_path" != /* ]] && t_path="/$t_path"
 
     if [[ "$t_choice" == "2" ]]; then
@@ -420,26 +422,23 @@ install_cf_tunnel() {
         t_port=${t_port:-$r_t_port}
     fi
 
-    # 3. 環境準備 (假設 detect_arch 已定義)
+    # 3. 環境準備
     [[ -z "$CF_ARCH" ]] && detect_arch
-    local CF_BIN="/usr/local/bin/cloudflared"
-    local CF_LOG="/var/log/cloudflared.log"
-
     if [[ ! -f "$CF_BIN" ]]; then
         echo -e "${YELLOW}正在下載最新 cloudflared...${PLAIN}"
         wget -q -O "$CF_BIN" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x "$CF_BIN"
     fi
 
-    # 4. 清理舊進程
+    # 4. 徹底清理舊進程與日誌
+    echo -e "${YELLOW}正在清理舊 cloudflared 進程與配置...${PLAIN}"
     pkill -9 cloudflared >/dev/null 2>&1
     systemctl stop cloudflared >/dev/null 2>&1
     : > "$CF_LOG"
 
-    # 5. 臨時隧道獲取域名
+    # 5. 臨時隧道獲取域名邏輯
     if [[ "$t_choice" == "1" ]]; then
         echo -e "${YELLOW}正在啟動臨時隧道獲取域名...${PLAIN}"
-        # 啟動臨時進程以獲取域名
         nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
         
         echo -e "${BLUE}等待域名生成 (最多 35 秒)...${PLAIN}"
@@ -452,7 +451,7 @@ install_cf_tunnel() {
         echo ""
 
         if [[ -z "$t_domain" ]]; then
-            echo -e "${RED}錯誤：無法獲取臨時域名。請檢查網絡或防火牆。${PLAIN}"
+            echo -e "${RED}錯誤：無法獲取臨時域名。${PLAIN}"
             pkill -9 cloudflared
             return 1
         fi
@@ -460,7 +459,8 @@ install_cf_tunnel() {
         echo -e "${GREEN}✓ 成功獲取域名：${CYAN}$t_domain${PLAIN}"
     fi
 
-    # 6. 寫入 Xray 配置 (注意：port 必須與隧道回源一致)
+    # 6. 寫入 Xray 隧道配置
+    echo -e "${BLUE}[進度] 正在寫入 Xray 隧道配置...${PLAIN}"
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -474,16 +474,22 @@ install_cf_tunnel() {
         },
         "streamSettings": {
             "network": "ws",
+            "security": "none",
             "wsSettings": {
                 "path": "$t_path",
-                "headers": { "Host": "$t_domain" }
+                "headers": {
+                    "Host": "$t_domain"
+                }
             }
         }
     }]
 }
 EOF
 
-    # 7. 設置 Systemd 服務
+    # 7. 重啟 Xray 並進行配置檢查
+    restart_and_check
+
+    # 8. 設定持久化服務
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --url http://127.0.0.1:$t_port"
@@ -491,7 +497,8 @@ EOF
         cf_cmd="tunnel --no-autoupdate run --token $t_token"
     fi
 
-    cat <<EOF > /etc/systemd/system/cloudflared.service
+    if [ "$HAS_SYSTEMD" = true ]; then
+        cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
 Description=Cloudflare Tunnel Service
 After=network.target
@@ -505,21 +512,33 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
+        systemctl daemon-reload
+        systemctl enable --now cloudflared
+    else
+        # Alpine OpenRC 邏輯
+        cat <<EOF > /etc/init.d/cloudflared
+#!/sbin/openrc-run
+command="$CF_BIN"
+command_args="$cf_cmd"
+command_background="yes"
+pidfile="/run/cloudflared.pid"
+depend() { need net; }
+EOF
+        chmod +x /etc/init.d/cloudflared
+        rc-update add cloudflared default >/dev/null 2>&1
+        rc-service cloudflared restart >/dev/null 2>&1
+    fi
 
-    systemctl daemon-reload
-    systemctl enable --now cloudflared
-
-    # 8. 重啟 Xray (假設 restart_and_check 已定義)
-    restart_and_check
-
+    # 9. 最終提示
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN} CF Tunnel 配置完成！${PLAIN}"
-    echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
+    echo -e "${GREEN} CF Tunnel 安裝完成！${PLAIN}"
+    echo -e " 域名: ${CYAN}${t_domain:-固定隧道}${PLAIN}"
     echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
     echo -e " 路徑: ${CYAN}${t_path}${PLAIN}"
-    echo -e " 傳輸: ${CYAN}WebSocket (WS)${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
 }
+
+# 统一重启与冲突校验函数
 restart_and_check() {
     echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
     
