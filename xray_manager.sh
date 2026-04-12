@@ -380,10 +380,9 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel ---
+# --- 3. 安裝 CF Tunnel (完整輸出版) ---
 install_cf_tunnel() {
-    # 不再靜默安裝基礎依賴，方便看報錯
-    echo -e "${BLUE}[1/9] 正在安裝/檢查系統基礎依賴...${PLAIN}"
+    echo -e "${BLUE}[1/9] 正在檢查系統環境...${PLAIN}"
     install_base
 
     echo -e "${PURPLE}--- 開始配置 CF Tunnel (VLESS + WS 透明轉發) ---${PLAIN}"
@@ -399,51 +398,36 @@ install_cf_tunnel() {
     # 2. 用戶輸入
     echo -e "選擇隧道類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
     read -p "選擇 [1-2]: " t_choice
-
-    read -p "請輸入隧道UUID (回車隨機: $r_t_uuid): " t_uuid
-    t_uuid=${t_uuid:-$r_t_uuid}
-
-    read -p "請輸入自訂節點名稱 (預設: CF_Tunnel): " t_node_name
-    t_node_name=${t_node_name:-"CF_Tunnel"}
-
-    read -p "請輸入隧道路徑 (回車隨機: $r_t_path): " t_path
-    t_path=${t_path:-$r_t_path}
+    read -p "請輸入隧道UUID (回車隨機: $r_t_uuid): " t_uuid; t_uuid=${t_uuid:-$r_t_uuid}
+    read -p "請輸入自訂節點名稱 (預設: CF_Tunnel): " t_node_name; t_node_name=${t_node_name:-"CF_Tunnel"}
+    read -p "請輸入隧道路徑 (回車隨機: $r_t_path): " t_path; t_path=${t_path:-$r_t_path}
     [[ "$t_path" != /* ]] && t_path="/$t_path"
 
     if [[ "$t_choice" == "2" ]]; then
         read -p "請輸入 CF 綁定域名: " t_domain
         read -p "請輸入 Tunnel Token: " t_token
-        [[ -z "$t_domain" || -z "$t_token" ]] && { echo -e "${RED}錯誤：域名或 Token 不能為空！${PLAIN}"; return 1; }
+        [[ -z "$t_domain" || -z "$t_token" ]] && { echo -e "${RED}錯誤：不能為空${PLAIN}"; return 1; }
         echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
     else
-        read -p "回源端口 (回車隨機: $r_t_port): " t_port
-        t_port=${t_port:-$r_t_port}
+        read -p "回源端口 (回車隨機: $r_t_port): " t_port; t_port=${t_port:-$r_t_port}
     fi
 
-    # 3. 下載 Cloudflared (移除靜默 wget)
+    # 3. 下載 Cloudflared
     [[ -z "$CF_ARCH" ]] && detect_arch
     if [[ ! -f "$CF_BIN" ]]; then
-        echo -e "${YELLOW}[2/9] 正在下載 cloudflared (架構: $CF_ARCH)...${PLAIN}"
+        echo -e "${YELLOW}[2/9] 正在下載 cloudflared...${PLAIN}"
         wget -O "$CF_BIN" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}下載 cloudflared 失敗，請檢查網絡連結！${PLAIN}"
-            read -p "按回車返回..."
-            return 1
-        fi
         chmod +x "$CF_BIN"
     fi
 
-    # 4. 清理舊進程
-    echo -e "${YELLOW}[3/9] 正在清理舊進程...${PLAIN}"
+    # 4. 清理
     pkill -9 cloudflared 2>/dev/null
     : > "$CF_LOG"
 
     # 5. 獲取臨時域名
     if [[ "$t_choice" == "1" ]]; then
-        echo -e "${YELLOW}[4/9] 正在啟動臨時隧道...${PLAIN}"
+        echo -e "${YELLOW}[4/9] 正在獲取臨時域名...${PLAIN}"
         nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
-        
-        echo -e "${BLUE}等待域名生成 (最多 35 秒)...${PLAIN}"
         for i in {1..35}; do
             echo -ne "\r進度: ${i}/35 秒"
             t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -n 1)
@@ -451,19 +435,11 @@ install_cf_tunnel() {
             sleep 1
         done
         echo ""
-
-        if [[ -z "$t_domain" ]]; then
-            echo -e "${RED}錯誤：無法獲取臨時域名。以下是 cloudflared 的最後日誌：${PLAIN}"
-            tail -n 5 "$CF_LOG"
-            pkill -9 cloudflared
-            read -p "按回車返回..."
-            return 1
-        fi
+        [[ -z "$t_domain" ]] && { echo -e "${RED}獲取失敗${PLAIN}"; return 1; }
         echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
     fi
 
     # 6. 寫入配置
-    echo -e "${YELLOW}[5/9] 正在寫入 Xray 配置...${PLAIN}"
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -480,12 +456,10 @@ install_cf_tunnel() {
 }
 EOF
 
-    # 7. 重啟 Xray (顯示重啟結果)
-    echo -e "${YELLOW}[6/9] 正在重啟 Xray 服務...${PLAIN}"
+    # 7. 重啟 Xray
     restart_and_check
 
     # 8. 服務持久化
-    echo -e "${YELLOW}[7/9] 正在配置服務自啟動...${PLAIN}"
     local cf_cmd=""
     [[ "$t_choice" == "1" ]] && cf_cmd="tunnel --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
@@ -493,7 +467,6 @@ EOF
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
-Description=Cloudflare Tunnel Service
 After=network.target
 [Service]
 ExecStart=$CF_BIN $cf_cmd
@@ -503,12 +476,10 @@ User=root
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable cloudflared
-        systemctl start cloudflared
+        systemctl enable --now cloudflared
     else
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
-description="Cloudflare Tunnel"
 command="$CF_BIN"
 command_args="$cf_cmd"
 command_background="yes"
@@ -520,13 +491,29 @@ EOF
         rc-service cloudflared restart
     fi
 
+    # --- 9. 核心：節點數據輸出  ---
+    # 確保路徑編碼正確
+    local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
+    
+    # 這裡增加了一些參數提升成功率：
+    # 1. 移除了 h2，優先使用 http/1.1 (WS 兼容性更好)
+    # 2. 強制指定 SNI
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome&alpn=http%2F1.1#$t_node_name"
+
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN} CF Tunnel 配置完成！${PLAIN}"
+    echo -e "${GREEN} CF Tunnel 配置完成 (優化版)！${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
     echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
+    echo -e " 路徑: ${CYAN}${t_path}${PLAIN}"
+    echo -e "----------------------------------------"
+    echo -e "${BLUE} 請嘗試導入此鏈接 (已優化 WS 兼容性): ${PLAIN}"
+    echo -e "${CYAN}${vless_link}${PLAIN}"
+    echo -e "${YELLOW} ⚠️  提示: 若仍顯示 -1，請檢查服務器時間是否同步: ntpdate pool.ntp.org${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    
     read -p "按回車鍵返回主菜單..."
 }
+
 # 统一重启与冲突校验函数
 restart_and_check() {
     echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
