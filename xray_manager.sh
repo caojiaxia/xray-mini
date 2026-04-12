@@ -380,23 +380,25 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel  ---
+# --- 3. 安裝 CF Tunnel ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel (適配新版核心) ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (xhttp 模式) ---${PLAIN}"
 
+    # 1. 變數預設 (保底邏輯)
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local t_port=8080
 
+    # 2. 交互輸入 (確保自訂名稱和回車保底)
     echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
     read -p "選擇 [1-2]: " t_choice
-
+    
     read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
 
-    read -p "請輸入節點名稱 (預設: CF_Tunnel): " input_node_name
-    t_node_name=${input_node_name:-"CF_Tunnel"}
+    read -p "請輸入節點名稱 (預設: CF_xhttp_Tunnel): " input_node_name
+    t_node_name=${input_node_name:-"CF_xhttp_Tunnel"}
 
     read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
     t_path=${input_path:-$r_t_path}
@@ -410,18 +412,22 @@ install_cf_tunnel() {
         read -p "請輸入 Tunnel Token: " t_token
         [[ -z "$t_domain" || -z "$t_token" ]] && return 1
     else
-        echo -e "${YELLOW}獲取臨時域名中...${PLAIN}"
+        echo -e "${YELLOW}正在啟動臨時隧道獲取域名...${PLAIN}"
         pkill -9 cloudflared >/dev/null 2>&1
+        : > "$CF_LOG"
         nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$t_port" > "$CF_LOG" 2>&1 &
         for i in {1..30}; do
+            echo -ne "\r抓取網域中... ${i}/30s"
             t_domain=$(grep -oE '[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -n 1)
             [[ -n "$t_domain" ]] && break
             sleep 1
         done
-        [[ -z "$t_domain" ]] && return 1
+        echo ""
+        [[ -z "$t_domain" ]] && { echo -e "${RED}獲取失敗${PLAIN}"; return 1; }
     fi
 
-    # 寫入配置：保持極簡，不寫 Host 匹配，只留 path
+    # 3. 核心：寫入 xhttp 入站 (這是解決 -1 的關鍵)
+    # xhttp 在 Cloudflare 隧道下的表現遠比傳統 WS 穩定
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
     "inbounds": [{
@@ -434,29 +440,53 @@ install_cf_tunnel() {
             "decryption": "none"
         },
         "streamSettings": {
-            "network": "ws",
-            "wsSettings": {
-                "path": "$t_path"
+            "network": "xhttp",
+            "xhttpSettings": {
+                "path": "$t_path",
+                "mode": "packet-up"
             }
         }
     }]
 }
 EOF
+
+    # 4. 重啟並驗證
     restart_and_check
 
-    # 持久化
+    # 5. 持久化服務 (確保路徑正確)
     local cf_cmd="tunnel --url http://127.0.0.1:$t_port"
     [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
-    # ... (這裡省略 systemd/openrc 腳本，保持跟你原來的邏輯一致) ...
 
-    # --- 輸出優化 (解決 -1 的關鍵) ---
+    if [ "$HAS_SYSTEMD" = true ]; then
+        cat <<EOF > /etc/systemd/system/cloudflared.service
+[Unit]
+After=network.target
+[Service]
+ExecStart=$CF_BIN $cf_cmd
+Restart=always
+User=root
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        [[ "$t_choice" == "2" ]] && systemctl enable --now cloudflared
+    else
+        cat <<EOF > /etc/init.d/cloudflared
+#!/sbin/openrc-run
+command="$CF_BIN"
+command_args="$cf_cmd"
+command_background="yes"
+pidfile="/run/cloudflared.pid"
+depend() { need net; }
+EOF
+        chmod +x /etc/init.d/cloudflared
+        [[ "$t_choice" == "2" ]] && { rc-update add cloudflared default; rc-service cloudflared restart; }
+    fi
+
+    # 6. 生成 xhttp 專用鏈接
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    
-    # 核心修改：
-    # 1. 刪除 alpn=http/1.1 (新版 Xray 對這個很敏感，讓它自動協商)
-    # 2. 確保 SNI 只有域名
-    # 3. 增加 fp=chrome 模擬指紋
-    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=ws&host=$t_domain&path=$t_path_enc&fp=chrome#$t_node_name"
+    # 這裡 type 必須是 xhttp，mode 必須是 packet-up
+    local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
