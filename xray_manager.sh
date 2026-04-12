@@ -380,40 +380,40 @@ EOF
     fi
 }
 
-# --- 3. 安裝 CF Tunnel ---
+# --- 3. 安裝 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 配置 CF Tunnel (ALPN 加強版) ---${PLAIN}"
+    echo -e "${PURPLE}--- 配置 CF Tunnel (不影響直連模塊) ---${PLAIN}"
 
-    # 1. 物理路徑鎖定
+    # 1. 物理路徑硬編碼
     local BIN_PATH="/usr/local/bin/cloudflared"
-    local XRAY_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
+    # 注意：隧道配置獨立存放，不覆蓋直連的 config.json
+    local TUNNEL_CONF="/usr/local/etc/xray/conf_2_tunnel.json"
 
-    # 2. 下載檢測 (物理寫入)
+    # 2. 物理下載
     if [[ ! -f "$BIN_PATH" ]]; then
-        echo -e "${YELLOW}正在物理下載 cloudflared...${PLAIN}"
+        echo -e "${YELLOW}正在下載物理文件...${PLAIN}"
         [[ -z "$CF_ARCH" ]] && detect_arch
         wget -O "$BIN_PATH" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
         chmod +x "$BIN_PATH"
     fi
 
-    # 3. 獲取用戶輸入 (回車保底)
+    # 3. 獲取用戶輸入
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "550e8400-e29b-41d4-a716-446655440000")
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
-    
-    echo -e "選擇類型: ${YELLOW}1.${PLAIN} 臨時隧道  ${YELLOW}2.${PLAIN} 固定隧道"
-    read -p "選擇 [1-2]: " t_choice
-    read -p "請輸入 UUID (回車隨機: $r_t_uuid): " input_uuid
+    local t_port=8080
+
+    read -p "選擇類型 [1.臨時 2.固定]: " t_choice
+    read -p "UUID (回車隨機): " input_uuid
     t_uuid=${input_uuid:-$r_t_uuid}
-    read -p "請輸入節點名稱 (預設: CF_ALPN_Node): " input_node_name
-    t_node_name=${input_node_name:-"CF_ALPN_Node"}
-    read -p "請輸入路徑 (回車隨機: $r_t_path): " input_path
+    read -p "節點名稱: " input_node_name
+    t_node_name=${input_node_name:-"CF_Tunnel_Node"}
+    read -p "路徑 (回車隨機): " input_path
     t_path=${input_path:-$r_t_path}
     [[ "$t_path" != /* ]] && t_path="/$t_path"
 
     local t_domain=""
     local t_token=""
-    local t_port=8080
 
     if [[ "$t_choice" == "2" ]]; then
         read -p "請輸入固定域名: " t_domain
@@ -429,8 +429,9 @@ install_cf_tunnel() {
         done
     fi
 
-    # 4. 寫入 Xray 配置 (回歸 xhttp 並正確處理入站)
-    cat <<EOF > "$XRAY_CONF"
+    # 4. 寫入隧道專屬配置 (只聽 127.0.0.1，保證隧道穩定)
+    # 這裏不會修改你的直連模塊配置文件！
+    cat <<EOF > "$TUNNEL_CONF"
 {
     "inbounds": [{
         "listen": "127.0.0.1",
@@ -443,25 +444,24 @@ install_cf_tunnel() {
         },
         "streamSettings": {
             "network": "xhttp",
-            "xhttpSettings": {
-                "path": "$t_path",
-                "mode": "packet-up"
-            }
+            "xhttpSettings": { "path": "$t_path", "mode": "packet-up" }
         }
     }]
 }
 EOF
+
+    # 重啟 Xray，加載所有配置
     restart_and_check
 
-    # 5. OpenRC 服務守護 (絕對路徑寫死)
-    local cf_cmd="tunnel --url http://127.0.0.1:$t_port"
-    [[ "$t_choice" == "2" ]] && cf_cmd="tunnel --no-autoupdate run --token $t_token"
+    # 5. OpenRC 服務守護
+    local cf_args="tunnel --protocol http2 --url http://127.0.0.1:$t_port"
+    [[ "$t_choice" == "2" ]] && cf_args="tunnel --protocol http2 --no-autoupdate run --token $t_token"
 
     cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
 description="Cloudflare Tunnel"
 command="/usr/local/bin/cloudflared"
-command_args="$cf_cmd"
+command_args="$cf_args"
 command_background="yes"
 pidfile="/run/cloudflared.pid"
 depend() { need net; }
@@ -470,15 +470,14 @@ EOF
     rc-update add cloudflared default >/dev/null 2>&1
     rc-service cloudflared restart
 
-    # 6. 生成帶有 ALPN 的鏈接 (解決你的需求)
+    # 6. 生成鏈接 (帶 ALPN)
     local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
-    # 在鏈接末尾精準添加 alpn=h2,http/1.1
     local vless_link="vless://$t_uuid@$t_domain:443?security=tls&sni=$t_domain&type=xhttp&host=$t_domain&path=$t_path_enc&mode=packet-up&fp=chrome&alpn=h2,http/1.1#$t_node_name"
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " 域名: ${CYAN}${t_domain}${PLAIN}"
-    echo -e " UUID: ${CYAN}${t_uuid}${PLAIN}"
     echo -e " 鏈接: ${YELLOW}${vless_link}${PLAIN}"
+    echo -e " 提示: 直連模塊的 IPv6 優先級不受此配置影響${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     read -p "按回車返回..."
 }
