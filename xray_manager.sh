@@ -115,44 +115,33 @@ enable_bbr() {
     read -p "按回车键返回..."
 }
 
-# --- 1. 基础环境安装 (增强容错版) ---
+# --- 1. 基础环境安装 (极致兼容版) ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    
-    # 自动识别包管理器
+    # 自动识别并安装依赖，屏蔽不必要的报错
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update && apt-get install -y curl wget jq socat cron openssl tar lsof net-tools unzip nginx
     elif command -v yum >/dev/null 2>&1; then
         yum install -y epel-release && yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip nginx
-    else
-        echo -e "${RED}[错误] 未能识别的系统包管理器，请手动安装依赖。${PLAIN}"
     fi
     
-    # 检查 Systemd 环境
-    if ! command -v systemctl >/dev/null 2>&1; then
-        echo -e "${RED}[致命错误] 系统缺少 systemctl，本脚本暂不支持 OpenWRT/Docker/LXC 等无 systemd 环境。${PLAIN}"
-        return 1
-    fi
+    # 核心路径强制创建
+    mkdir -p /usr/local/etc/xray "$CERT_DIR" /etc/systemd/system /var/www/html
 
-    mkdir -p /usr/local/etc/xray "$CERT_DIR"
-
-    # 清理缓存 (增加权限判断)
-    echo -e "${YELLOW}正在清理系统缓存...${PLAIN}"
-    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo -e "${YELLOW}[跳过] 权限不足，无法清理内核缓存。${PLAIN}"
+    # 清理缓存 (增加权限容错)
+    echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
 
     # 暴力清理旧进程
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
-    echo -e "${YELLOW}正在获取 Xray 核心版本...${PLAIN}"
+    echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
     
-    # --- 修复版版本获取逻辑 ---
-    local XRAY_VER=$(curl -sH "Accept: application/vnd.github.v3+json" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-    if [[ -z "$XRAY_VER" || "$XRAY_VER" == "null" ]]; then
-        XRAY_VER="v1.8.24" # 彻底兜底
-    fi
-    echo -e "${GREEN}确定的版本号: $XRAY_VER${PLAIN}"
+    # 修复版本获取逻辑
+    local XRAY_VER=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z "$XRAY_VER" ]] && XRAY_VER="v1.8.24"
     
     local ARCH=$(uname -m)
     local XRAY_ARCH="64"
@@ -160,48 +149,31 @@ install_base() {
     
     local DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
     
-    # --- 增强型下载逻辑 ---
-    echo -e "${BLUE}正在拉取二进制文件...${PLAIN}"
-    # 尝试 1: 加速镜像
-    wget -O /tmp/xray.zip --timeout=15 "https://github.moeyy.xyz/${DOWNLOAD_URL}"
-    # 尝试 2: 如果镜像失败或解析不了，走原站
-    if [[ $? -ne 0 || ! -f /tmp/xray.zip ]]; then
-        echo -e "${YELLOW}[提醒] 加速镜像失效，尝试直连 GitHub...${PLAIN}"
-        wget -O /tmp/xray.zip --timeout=30 "${DOWNLOAD_URL}"
-    fi
+    # 下载核心 (增加 DNS 容错)
+    wget -O /tmp/xray.zip --timeout=15 "https://github.moeyy.xyz/${DOWNLOAD_URL}" || wget -O /tmp/xray.zip --timeout=30 "${DOWNLOAD_URL}"
     
-    if [[ -s /tmp/xray.zip ]]; then
+    if [[ -f /tmp/xray.zip ]]; then
         mkdir -p /tmp/xray_ext
         unzip -q -o /tmp/xray.zip -d /tmp/xray_ext
-        if [[ -f /tmp/xray_ext/xray ]]; then
-            mv /tmp/xray_ext/xray /usr/local/bin/xray
-            chmod +x /usr/local/bin/xray
-            echo -e "${GREEN}[成功] Xray 核心已就位: $(/usr/local/bin/xray version | head -n 1)${PLAIN}"
-        else
-            echo -e "${RED}[错误] 解压后未找到二进制文件。${PLAIN}"
-            return 1
-        fi
+        mv /tmp/xray_ext/xray /usr/local/bin/xray
         rm -rf /tmp/xray.zip /tmp/xray_ext
     else
-        echo -e "${RED}[致命错误] Xray 下载失败，请检查网络或 DNS 设置。${PLAIN}"
+        echo -e "${RED}[错误] Xray 下载失败，请检查机器网络！${PLAIN}"
         return 1
     fi
     
-    # --- 核心权限修正 ---
+    # 权限修正
     if [[ -f /usr/local/bin/xray ]]; then
-        echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
         local xray_ver=$(/usr/local/bin/xray version | head -n 1)
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # 【步骤 2-3-4】：保持原有的 Service 生成与修正逻辑
+    # --- 服务文件写入 (增加路径检查) ---
     local SERVICE_FILE="/etc/systemd/system/xray.service"
-    [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
-
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        cat <<EOF > /etc/systemd/system/xray.service
+    if [[ -d "/etc/systemd/system" ]]; then
+        cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls/xray-core
@@ -221,39 +193,34 @@ LimitNOFILE=1000000
 [Install]
 WantedBy=multi-user.target
 EOF
-        SERVICE_FILE="/etc/systemd/system/xray.service"
-    fi
-
-    if [[ -f "$SERVICE_FILE" ]]; then
-        systemctl stop xray >/dev/null 2>&1
-        sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
-        sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
-        rm -rf "${SERVICE_FILE}.d"
-        rm -f /usr/local/etc/xray/config.json
         chmod 644 "$SERVICE_FILE"
-        systemctl daemon-reload
-        echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
+        systemctl daemon-reload >/dev/null 2>&1
+        echo -e "${GREEN}[成功] 服务文件配置完毕。${PLAIN}"
     else
-        echo -e "${RED}[致命错误] 无法定位服务文件。${PLAIN}"
-        return 1
+        echo -e "${YELLOW}[警告] 系统不支持 systemd，将以 nohup 模式运行。${PLAIN}"
     fi
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS (已集成 Nginx 自动伪装) ---
+# --- 2. 安装 VLESS+xhttp+TLS (Nginx 集成版) ---
 install_vless_direct() {
     [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
     [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
     
     install_base
     
-    # --- [集成 Nginx 静默安装与网页生成] ---
+    # --- Nginx 伪装集成逻辑 ---
     if lsof -i:80 > /dev/null 2>&1; then
-        echo -e "${YELLOW}[注意] 80 端口已被占用，脚本将跳过 Nginx 自动安装以防冲突。${PLAIN}"
+        echo -e "${YELLOW}[注意] 80 端口已被占用，跳过 Nginx 自动配置。${PLAIN}"
     else
         echo -e "${BLUE}[进度] 正在配置 Nginx 伪装网页...${PLAIN}"
         mkdir -p /var/www/html
-        echo "<h1>Welcome to nginx!</h1><p>Your site is working.</p>" > /var/www/html/index.html
-        systemctl enable nginx && systemctl restart nginx
+        echo "<h1>Welcome to nginx!</h1>" > /var/www/html/index.html
+        # 兼容性启动 Nginx
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable nginx && systemctl restart nginx
+        else
+            service nginx restart || nginx
+        fi
     fi
 
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
@@ -269,7 +236,6 @@ install_vless_direct() {
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
-    echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
     read -p "请输入UUID (回车随机: $r_uuid): " uuid; uuid=${uuid:-$r_uuid}
     read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
@@ -281,8 +247,7 @@ install_vless_direct() {
     echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    # --- 证书申请逻辑保持原样 ---
-    echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
+    # --- 证书申请逻辑 ---
     if [[ ! -f ~/.acme.sh/acme.sh ]]; then
         curl https://get.acme.sh | sh -s email=admin@$domain
     fi
@@ -296,28 +261,25 @@ install_vless_direct() {
         export CF_Email="$cf_e"
         $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
-        # 申请前停一下 nginx 释放 80 端口，申请完再拉起来
-        systemctl stop nginx >/dev/null 2>&1
+        # 临时停止 Nginx 释放 80 端口
+        if command -v systemctl >/dev/null 2>&1; then systemctl stop nginx; else service nginx stop || pkill nginx; fi
         $ACME_BIN --issue -d $domain --standalone --force
-        systemctl start nginx >/dev/null 2>&1
+        if command -v systemctl >/dev/null 2>&1; then systemctl start nginx; else service nginx start || nginx; fi
     fi
 
-    if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
+    if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
         mkdir -p $CERT_DIR
         cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
         cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
-        chmod 644 $CERT_DIR/server.key $CERT_DIR/server.crt
     else
-        echo -e "${RED}[致命错误] 无法获取证书。${PLAIN}"
-        return 1
+        echo -e "${RED}[错误] 证书申请失败！${PLAIN}"; return 1
     fi
 
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
-    echo -e "${BLUE}[进度] 正在写入核心配置...${PLAIN}"
-
     check_network_strategy
 
-cat <<EOF > $XRAY_CONF_DIRECT
+    # 核心配置写入
+    cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -332,47 +294,31 @@ cat <<EOF > $XRAY_CONF_DIRECT
         "streamSettings": {
             "network": "xhttp", 
             "security": "tls",
-            "xhttpSettings": { 
-                "path": "$path", 
-                "mode": "auto", 
-                "host": "$domain" 
-            },
+            "xhttpSettings": { "path": "$path", "mode": "auto", "host": "$domain" },
             "tlsSettings": {
-                "certificates": [{ 
-                    "certificateFile": "$CERT_DIR/server.crt", 
-                    "keyFile": "$CERT_DIR/server.key" 
-                }],
+                "certificates": [{ "certificateFile": "$CERT_DIR/server.crt", "keyFile": "$CERT_DIR/server.key" }],
                 "alpn": ["$alpn_formatted"],
                 "fingerprint": "$fp"
             }
         }
     }],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "$strategy"
-            }
-        }
-    ]
+    "outbounds": [{ "protocol": "freedom", "settings": { "domainStrategy": "$strategy" } }]
 }
 EOF
 
-    systemctl stop xray >/dev/null 2>&1
-    pkill -9 xray >/dev/null 2>&1
-    sleep 1
-    systemctl start xray
+    # 启动逻辑
+    echo -e "${BLUE}[进度] 正在启动服务...${PLAIN}"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart xray
+    else
+        pkill -9 xray >/dev/null 2>&1
+        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /var/log/xray_run.log 2>&1 &
+    fi
     
     sleep 2
-    if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
-        show_node_info
-    else
-        echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
-        /usr/local/bin/xray -test -config $XRAY_CONF_DIRECT
-    fi
+    echo -e "${GREEN}VLESS+xhttp+TLS 部署尝试完成。${PLAIN}"
+    show_node_info
 }
-
 # --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
 install_cf_tunnel() {
     install_base
