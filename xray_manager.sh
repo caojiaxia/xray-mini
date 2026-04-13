@@ -114,50 +114,76 @@ enable_bbr() {
     fi
     read -p "按回车键返回..."
 }
-# --- 1. 基础环境安装 (已修复 Xray 下载并引入 Nginx 依赖) ---
+
+# --- 1. 基础环境安装 (增强容错版) ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    # 增加 nginx 和 unzip (用于解压手动下载的核心)
-    if [[ -f /usr/bin/apt ]]; then
-        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip nginx
-    else
+    
+    # 自动识别包管理器
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y curl wget jq socat cron openssl tar lsof net-tools unzip nginx
+    elif command -v yum >/dev/null 2>&1; then
         yum install -y epel-release && yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip nginx
+    else
+        echo -e "${RED}[错误] 未能识别的系统包管理器，请手动安装依赖。${PLAIN}"
     fi
     
+    # 检查 Systemd 环境
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo -e "${RED}[致命错误] 系统缺少 systemctl，本脚本暂不支持 OpenWRT/Docker/LXC 等无 systemd 环境。${PLAIN}"
+        return 1
+    fi
+
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 【紧急清理内存 & 释放缓存】
-    echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
-    sync && echo 3 > /proc/sys/vm/drop_caches
+    # 清理缓存 (增加权限判断)
+    echo -e "${YELLOW}正在清理系统缓存...${PLAIN}"
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo -e "${YELLOW}[跳过] 权限不足，无法清理内核缓存。${PLAIN}"
 
-    # 【核心修改：暴力清理并重新拉取】
-    # 修复原脚本无法正常下载的问题，改用手动拉取 + 镜像加速
+    # 暴力清理旧进程
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
-    echo -e "${YELLOW}正在通过备用下载源拉取最新版 Xray 核心...${PLAIN}"
+    echo -e "${YELLOW}正在获取 Xray 核心版本...${PLAIN}"
     
-    # 动态获取最新版本号
-    local XRAY_VER=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$XRAY_VER" ]] && XRAY_VER="v1.8.24"
+    # --- 修复版版本获取逻辑 ---
+    local XRAY_VER=$(curl -sH "Accept: application/vnd.github.v3+json" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
+    if [[ -z "$XRAY_VER" || "$XRAY_VER" == "null" ]]; then
+        XRAY_VER="v1.8.24" # 彻底兜底
+    fi
+    echo -e "${GREEN}确定的版本号: $XRAY_VER${PLAIN}"
     
     local ARCH=$(uname -m)
     local XRAY_ARCH="64"
-    if [[ "$ARCH" == "aarch64" ]]; then XRAY_ARCH="arm64-v8a"; fi
+    [[ "$ARCH" == "aarch64" ]] && XRAY_ARCH="arm64-v8a"
     
     local DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
     
-    # 使用加速镜像下载，确保香港/国内小鸡下载不卡死
-    wget -O /tmp/xray.zip --timeout=15 "https://github.moeyy.xyz/${DOWNLOAD_URL}" || wget -O /tmp/xray.zip --timeout=30 "${DOWNLOAD_URL}"
+    # --- 增强型下载逻辑 ---
+    echo -e "${BLUE}正在拉取二进制文件...${PLAIN}"
+    # 尝试 1: 加速镜像
+    wget -O /tmp/xray.zip --timeout=15 "https://github.moeyy.xyz/${DOWNLOAD_URL}"
+    # 尝试 2: 如果镜像失败或解析不了，走原站
+    if [[ $? -ne 0 || ! -f /tmp/xray.zip ]]; then
+        echo -e "${YELLOW}[提醒] 加速镜像失效，尝试直连 GitHub...${PLAIN}"
+        wget -O /tmp/xray.zip --timeout=30 "${DOWNLOAD_URL}"
+    fi
     
-    if [[ -f /tmp/xray.zip ]]; then
+    if [[ -s /tmp/xray.zip ]]; then
         mkdir -p /tmp/xray_ext
         unzip -q -o /tmp/xray.zip -d /tmp/xray_ext
-        mv /tmp/xray_ext/xray /usr/local/bin/xray
+        if [[ -f /tmp/xray_ext/xray ]]; then
+            mv /tmp/xray_ext/xray /usr/local/bin/xray
+            chmod +x /usr/local/bin/xray
+            echo -e "${GREEN}[成功] Xray 核心已就位: $(/usr/local/bin/xray version | head -n 1)${PLAIN}"
+        else
+            echo -e "${RED}[错误] 解压后未找到二进制文件。${PLAIN}"
+            return 1
+        fi
         rm -rf /tmp/xray.zip /tmp/xray_ext
     else
-        echo -e "${RED}[错误] Xray 二进制文件下载失败，请检查网络连接！${PLAIN}"
+        echo -e "${RED}[致命错误] Xray 下载失败，请检查网络或 DNS 设置。${PLAIN}"
         return 1
     fi
     
