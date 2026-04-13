@@ -115,65 +115,65 @@ enable_bbr() {
     read -p "按回车键返回..."
 }
 
-# --- 1. 基础环境安装 (极致兼容版) ---
+# --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    # 自动识别并安装依赖，屏蔽不必要的报错
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update && apt-get install -y curl wget jq socat cron openssl tar lsof net-tools unzip nginx
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y epel-release && yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip nginx
+    if [[ -f /usr/bin/apt ]]; then
+        # --- [加工：增加 nginx 依赖安装] ---
+        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools nginx
+    else
+        # --- [加工：增加 nginx 依赖安装] ---
+        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools nginx
     fi
     
-    # 核心路径强制创建
-    mkdir -p /usr/local/etc/xray "$CERT_DIR" /etc/systemd/system /var/www/html
+    mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
-    # 清理缓存 (增加权限容错)
+    # --- [加工：插入 Nginx 伪装网页初始化] ---
+    echo -e "${BLUE}[进度] 正在同步 Nginx 伪装环境...${PLAIN}"
+    mkdir -p /var/www/html
+    if [[ ! -f /var/www/html/index.html ]]; then
+        echo "<h1>System Running</h1>" > /var/www/html/index.html
+    fi
+    # 确保 nginx 能够正常管理
+    systemctl enable nginx >/dev/null 2>&1
+    # --------------------------------------
+
+    # 【紧急清理内存 & 释放缓存】
     echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
-    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    # --- [加工：针对权限报错进行静默处理，防止 Permission denied 导致脚本中断] ---
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo "跳过内存释放"
 
-    # 暴力清理旧进程
+    # 【核心修改：暴力清理并重新拉取】
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
     
-    # 修复版本获取逻辑
-    local XRAY_VER=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$XRAY_VER" ]] && XRAY_VER="v1.8.24"
+    # 使用官方脚本安装时增加限制，减少解压时的压力
+    # 如果还是断开，建议手动下载二进制文件
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     
-    local ARCH=$(uname -m)
-    local XRAY_ARCH="64"
-    [[ "$ARCH" == "aarch64" ]] && XRAY_ARCH="arm64-v8a"
-    
-    local DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
-    
-    # 下载核心 (增加 DNS 容错)
-    wget -O /tmp/xray.zip --timeout=15 "https://github.moeyy.xyz/${DOWNLOAD_URL}" || wget -O /tmp/xray.zip --timeout=30 "${DOWNLOAD_URL}"
-    
-    if [[ -f /tmp/xray.zip ]]; then
-        mkdir -p /tmp/xray_ext
-        unzip -q -o /tmp/xray.zip -d /tmp/xray_ext
-        mv /tmp/xray_ext/xray /usr/local/bin/xray
-        rm -rf /tmp/xray.zip /tmp/xray_ext
-    else
-        echo -e "${RED}[错误] Xray 下载失败，请检查机器网络！${PLAIN}"
-        return 1
-    fi
-    
-    # 权限修正
+    # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
+        echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
+        # 防止文件被锁定 (部分 LXC 环境常见)
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
+        
+        # 打印版本信息，确认 xhttp 支持情况
         local xray_ver=$(/usr/local/bin/xray version | head -n 1)
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # --- 服务文件写入 (增加路径检查) ---
+    # 【步骤 2】：精准定位服务文件路径
     local SERVICE_FILE="/etc/systemd/system/xray.service"
-    if [[ -d "/etc/systemd/system" ]]; then
-        cat <<EOF > "$SERVICE_FILE"
+    [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
+
+    # 【步骤 3】：如果官方没生成服务文件，则手动创建 (保持你原有的 Service 结构)
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
+        cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls/xray-core
@@ -193,11 +193,30 @@ LimitNOFILE=1000000
 [Install]
 WantedBy=multi-user.target
 EOF
+        SERVICE_FILE="/etc/systemd/system/xray.service"
+    fi
+
+    # 【步骤 4】：修正服务配置 
+    if [[ -f "$SERVICE_FILE" ]]; then
+        echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
+        systemctl stop xray >/dev/null 2>&1
+        pkill -9 xray >/dev/null 2>&1
+        
+        # 修正启动命令和运行用户
+        sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
+        sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+        
+        # 清理可能存在的冲突目录和默认配置
+        rm -rf "${SERVICE_FILE}.d"
+        rm -f /usr/local/etc/xray/config.json
+        
+        # 赋予服务文件权限并重载
         chmod 644 "$SERVICE_FILE"
-        systemctl daemon-reload >/dev/null 2>&1
-        echo -e "${GREEN}[成功] 服务文件配置完毕。${PLAIN}"
+        systemctl daemon-reload
+        echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
     else
-        echo -e "${YELLOW}[警告] 系统不支持 systemd，将以 nohup 模式运行。${PLAIN}"
+        echo -e "${RED}[致命错误] 无法定位 Xray 二进制文件或服务文件，安装失败。${PLAIN}"
+        return 1
     fi
 }
 
