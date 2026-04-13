@@ -139,22 +139,29 @@ install_base() {
 
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
     
-    # --- 核心行动逻辑 ---
+echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
+    
+    # 核心逻辑配置
     if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
         echo -e "${RED}[报错] 官方脚本失败。执行强行下载...${PLAIN}"
         local arch="64"
         [[ $(uname -m) == "aarch64" ]] && arch="arm64-v8a"
+        
+        # 1. 下载文件
         wget -O /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$arch.zip"
         
         if [[ -f /tmp/xray.zip ]]; then
             echo -e "${CYAN}[行动] 正在解压核心文件...${PLAIN}"
-            # 确保 unzip 命令存在
+            # 确保 unzip 存在
             if ! command -v unzip &> /dev/null; then
-                apt update && apt install -y unzip || yum install -y unzip
+                apt update && apt install -y unzip || yum install -y unzip || apk add unzip 2>/dev/null
             fi
-            # 解压并覆盖到目标目录
+            
+            # 2. 解压核心二进制文件
             unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
             chmod +x /usr/local/bin/xray
+            
+            # 3. 【关键】只有在这里删除 zip 包，不要在外面再执行一遍解压
             rm -f /tmp/xray.zip
             echo -e "${GREEN}[成功] 手动强装完成！${PLAIN}"
         else
@@ -162,8 +169,9 @@ install_base() {
             return 1
         fi
     fi
-    
+
     # --- 核心权限修正 ---
+    
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
