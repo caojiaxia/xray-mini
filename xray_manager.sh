@@ -118,19 +118,29 @@ enable_bbr() {
 # --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
+    # --- 灵感整合：自适应所有主流包管理器 ---
     if command -v apt &> /dev/null; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools nginx unzip
     elif command -v yum &> /dev/null; then
         yum install -y curl wget jq socat crontabs openssl tar lsof net-tools nginx unzip
+    elif command -v apk &> /dev/null; then
+        # 兼容 Alpine 环境依赖
+        apk add bash curl wget jq socat cronie openssl tar lsof net-tools nginx unzip libc6-compat gcompat >/dev/null 2>&1
     else
-        echo -e "${RED}[报错] 未找到 apt 或 yum 包管理器！${PLAIN}"
+        echo -e "${RED}[报错] 未找到标准包管理器，请手动确认依赖是否完整！${PLAIN}"
     fi
     
-    mkdir -p /usr/local/etc/xray "$CERT_DIR"
+    mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
+    # --- 灵感整合：有权限才清理，不再乱报错 ---
     echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
-    sync && echo 3 > /proc/sys/vm/drop_caches || echo -e "${RED}[注意] 缓存清理权限被拒绝。${PLAIN}"
+    if [[ -w /proc/sys/vm/drop_caches ]]; then
+        sync && echo 3 > /proc/sys/vm/drop_caches
+    else
+        echo -e "${CYAN}[提示] 当前环境锁定内核参数，已跳过内存清理。${PLAIN}"
+    fi
 
+    # 停止旧进程
     if command -v systemctl &> /dev/null; then
         systemctl stop xray >/dev/null 2>&1
     fi
@@ -139,39 +149,36 @@ install_base() {
 
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
     
-echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
-    
-    # 核心逻辑配置
+    # --- 核心逻辑配置：合并解压，彻底杜绝“文件找不到”错误 ---
     if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
-        echo -e "${RED}[报错] 官方脚本失败。执行强行下载...${PLAIN}"
+        echo -e "${RED}[报错] 官方脚本失败。执行手动强行下载...${PLAIN}"
         local arch="64"
         [[ $(uname -m) == "aarch64" ]] && arch="arm64-v8a"
         
-        # 1. 下载文件
+        # 使用 wget 下载
         wget -O /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$arch.zip"
         
         if [[ -f /tmp/xray.zip ]]; then
             echo -e "${CYAN}[行动] 正在解压核心文件...${PLAIN}"
-            # 确保 unzip 存在
+            # 确保 unzip 命令真的存在
             if ! command -v unzip &> /dev/null; then
-                apt update && apt install -y unzip || yum install -y unzip || apk add unzip 2>/dev/null
+                apt update && apt install -y unzip || yum install -y unzip || apk add unzip >/dev/null 2>&1
             fi
             
-            # 2. 解压核心二进制文件
+            # 执行解压并覆盖
             unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
             chmod +x /usr/local/bin/xray
             
-            # 3. 【关键】只有在这里删除 zip 包，不要在外面再执行一遍解压
+            # 【关键】删掉 zip 之前确保移动已完成
             rm -f /tmp/xray.zip
-            echo -e "${GREEN}[成功] 手动强装完成！${PLAIN}"
+            echo -e "${GREEN}[成功] 手动强装核心完成！${PLAIN}"
         else
-            echo -e "${RED}[错误] 下载核心包失败！${PLAIN}"
+            echo -e "${RED}[错误] 核心包下载失败，请检查网络连接！${PLAIN}"
             return 1
         fi
     fi
 
-    # --- 核心权限修正 ---
-    
+    # --- 核心权限修正：保留 chattr 处理 ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
@@ -180,13 +187,14 @@ echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # --- 后面所有的 SERVICE_FILE 和 sed 逻辑完全保留，不要改动 ---
+    # --- 后面所有的 SERVICE_FILE 和 sed 逻辑完全保留 ---
     local SERVICE_FILE="/etc/systemd/system/xray.service"
     [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
 
+    # 如果没有服务文件且支持 systemd，则补齐
     if [[ ! -f "$SERVICE_FILE" ]]; then
         if command -v systemctl &> /dev/null; then
-            echo -e "${YELLOW}[警告] 手动创建 $SERVICE_FILE ...${PLAIN}"
+            echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
             cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
@@ -211,13 +219,17 @@ EOF
         fi
     fi
 
+    # 修正服务配置 (保留所有 sed 替换逻辑)
     if [[ -f "$SERVICE_FILE" ]]; then
         if command -v systemctl &> /dev/null; then
             echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
             systemctl stop xray >/dev/null 2>&1
             pkill -9 xray >/dev/null 2>&1
+            
+            # 精准替换
             sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
             sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+            
             rm -rf "${SERVICE_FILE}.d"
             rm -f /usr/local/etc/xray/config.json
             chmod 644 "$SERVICE_FILE"
@@ -225,8 +237,9 @@ EOF
             echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
         fi
     else
+        # 兼容性反馈
         if ! command -v systemctl &> /dev/null; then
-             echo -e "${RED}[警告] 系统不支持 systemd。${PLAIN}"
+             echo -e "${RED}[警告] 系统不支持 systemd。脚本将尝试以进程模式维持。${PLAIN}"
         else
              echo -e "${RED}[致命错误] 无法定位 Xray 服务文件！${PLAIN}"
              return 1
