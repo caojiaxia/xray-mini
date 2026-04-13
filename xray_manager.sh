@@ -156,6 +156,20 @@ install_base() {
         rm -f /tmp/xray.zip
     fi
     
+        echo -e "${CYAN}[行动] 正在解压核心文件...${PLAIN}"
+        
+    # 兜底：如果 unzip 不存在，尝试安装
+    if ! command -v unzip &> /dev/null; then
+        apt update && apt install -y unzip || yum install -y unzip
+    fi
+
+        # 暴力解压
+        unzip -o /tmp/xray.zip -d /tmp/xray_temp/
+        cp -f /tmp/xray_temp/xray /usr/local/bin/xray
+        chmod +x /usr/local/bin/xray
+        rm -rf /tmp/xray_temp /tmp/xray.zip
+        echo -e "${GREEN}[成功] 手动解压完成！${PLAIN}"
+    
     # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
@@ -228,6 +242,7 @@ EOF
         fi
     fi
 }
+
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     # 变量兜底：防止全局变量失效导致空值操作风险
