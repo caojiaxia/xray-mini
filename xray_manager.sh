@@ -115,87 +115,95 @@ enable_bbr() {
     read -p "按回车键返回..."
 }
 
-# --- 1. 基础环境安装 (最终加固版) ---
+# --- 1. 基础环境安装 (注入强生存逻辑版) ---
 install_base() {
-    echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    # 自动识别包管理器
-    if command -v apt &> /dev/null; then
-        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools nginx unzip python3
-    elif command -v yum &> /dev/null; then
-        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools nginx unzip python3
-    elif command -v apk &> /dev/null; then
-        apk add bash curl wget jq socat cronie openssl tar lsof net-tools nginx unzip python3 libc6-compat gcompat >/dev/null 2>&1
+    echo -e "${BLUE}[进度] 正在安装基础依赖 (基于 Sing-box 脚本逻辑)...${PLAIN}"
+    
+    # 1. 极速环境识别
+    if [[ -f /usr/bin/apt ]]; then PM="apt"
+    elif [[ -f /usr/bin/yum ]]; then PM="yum"
+    elif [[ -f /sbin/apk ]]; then PM="apk"
     fi
-    
-    mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
-    echo -e "${YELLOW}正在清理内存缓存...${PLAIN}"
-    [[ -w /proc/sys/vm/drop_caches ]] && (sync && echo 3 > /proc/sys/vm/drop_caches) || echo "跳过缓存清理"
+    # 2. 依赖强装 (即使报错也继续)
+    if [[ "$PM" == "apt" ]]; then
+        apt update -y && apt install -y nginx curl wget jq tar unzip >/dev/null 2>&1
+    elif [[ "$PM" == "apk" ]]; then
+        apk add bash nginx curl wget jq tar unzip libc6-compat openrc >/dev/null 2>&1
+    fi
 
-    # 彻底清理旧残留
+    # 3. 架构精准锁死
+    local ARCH_RAW=$(uname -m)
+    case "${ARCH_RAW}" in
+        x86_64) ARCH="64" ;;
+        aarch64) ARCH="arm64-v8a" ;;
+        *) ARCH="64" ;;
+    esac
+
+    # 4. 强制清理与目录准备
     pkill -9 xray >/dev/null 2>&1
-    rm -rf /usr/local/bin/xray /usr/local/share/xray
+    mkdir -p /usr/local/etc/xray /usr/local/bin /usr/local/share/xray
 
-    echo -e "${YELLOW}正在通过手动模式获取 Xray 核心...${PLAIN}"
-    local arch="64"
-    [[ $(uname -m) == "aarch64" ]] && arch="arm64-v8a"
+    # 5. 绕过官方脚本：直接手动部署 Xray 核心
+    echo -e "${YELLOW}正在手动拉取 Xray 核心 (Static Binary)...${PLAIN}"
+    local LATEST_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH}.zip"
     
-    # 强制下载到临时目录
-    wget -qO /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$arch.zip"
-
+    # 使用 wget 强拉到 tmp
+    wget -qO /tmp/xray.zip "$LATEST_URL"
+    
     if [[ -f /tmp/xray.zip ]]; then
-        echo -e "${CYAN}[行动] 启动 Python 强力解压模式...${PLAIN}"
-        # 使用 Python 绕过系统 unzip 可能存在的权限或环境路径问题
-        python3 -c "import zipfile; import os; z = zipfile.ZipFile('/tmp/xray.zip'); z.extract('xray', '/tmp/');"
+        echo -e "${CYAN}[行动] 正在执行解压迁移...${PLAIN}"
+        # 这里使用了你脚本里类似的 unzip 逻辑，但增加了强制覆盖
+        unzip -o /tmp/xray.zip -d /tmp/ xray >/dev/null 2>&1
+        mv -f /tmp/xray /usr/local/bin/xray
+        chmod +x /usr/local/bin/xray
+        rm -f /tmp/xray.zip
         
-        if [[ -f /tmp/xray ]]; then
-            mv -f /tmp/xray /usr/local/bin/xray
-            chmod 755 /usr/local/bin/xray
-            rm -f /tmp/xray.zip
-            echo -e "${GREEN}[成功] Xray 核心已强制安装就位。${PLAIN}"
+        # 验证核心是否真的活着
+        if [[ -x "/usr/local/bin/xray" ]]; then
+            local VER=$(/usr/local/bin/xray version | head -n 1)
+            echo -e "${GREEN}[成功] Xray 核心已就绪: $VER${PLAIN}"
         else
-            echo -e "${RED}[错误] 解压失败，可能是 /tmp 目录无写入权限！${PLAIN}"
+            echo -e "${RED}[致命] 二进制文件写入失败，请检查硬盘空间或权限！${PLAIN}"
             exit 1
         fi
     else
-        echo -e "${RED}[错误] 下载核心包失败，请检查网络！${PLAIN}"
+        echo -e "${RED}[致命] 核心包下载失败，网络可能不通！${PLAIN}"
         exit 1
     fi
 
-    # 二进制校验
-    if [[ -f /usr/local/bin/xray ]]; then
-        local xray_ver=$(/usr/local/bin/xray version | head -n 1)
-        echo -e "${GREEN}[核心就绪] 版本: $xray_ver${PLAIN}"
+    # 6. 内存清理判断 (你之前卡死的地方)
+    if [[ -w /proc/sys/vm/drop_caches ]]; then
+        sync && echo 3 > /proc/sys/vm/drop_caches
     fi
 
-    # --- 服务注册逻辑 (兼容 Systemd 和非 Systemd) ---
-    local SERVICE_FILE="/etc/systemd/system/xray.service"
+    # 7. 服务自适应配置 (Systemd vs OpenRC)
     if command -v systemctl &> /dev/null; then
-        echo -e "${BLUE}[进度] 检测到 Systemd，正在配置服务...${PLAIN}"
-        cat <<EOF > "$SERVICE_FILE"
+        echo -e "${BLUE}[进度] 写入 Systemd 服务文件...${PLAIN}"
+        cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
-After=network.target nss-lookup.target
-
+After=network.target
 [Service]
-User=root
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
 ExecStart=/usr/local/bin/xray run -confdir /usr/local/etc/xray/
-Restart=on-failure
-LimitNPROC=10000
-LimitNOFILE=1000000
-
+Restart=always
+User=root
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-    else
-        echo -e "${RED}[警告] 无 Systemd 环境，稍后将使用 nohup 后台模式运行。${PLAIN}"
+    elif [[ -d /etc/init.d ]]; then
+        echo -e "${BLUE}[进度] 写入 OpenRC 服务文件...${PLAIN}"
+        cat <<EOF > /etc/init.d/xray
+#!/sbin/openrc-run
+command="/usr/local/bin/xray"
+command_args="run -confdir /usr/local/etc/xray/"
+command_background="yes"
+pidfile="/run/xray.pid"
+EOF
+        chmod +x /etc/init.d/xray
     fi
 }
-
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     # 变量兜底：防止全局变量失效导致空值操作风险
