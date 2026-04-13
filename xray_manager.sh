@@ -118,60 +118,63 @@ enable_bbr() {
 # --- 1. 基础环境安装 ---
 install_base() {
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    # --- 修正 1：自适应包管理器，解决 yum: command not found ---
+    # --- 修正：自适应包管理器，且不静默安装过程中的输出 ---
     if command -v apt &> /dev/null; then
         apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools nginx unzip
     elif command -v yum &> /dev/null; then
         yum install -y curl wget jq socat crontabs openssl tar lsof net-tools nginx unzip
     else
-        # 兼容 Alpine 等极简镜像
-        apk add curl wget jq socat openssl tar lsof net-tools nginx unzip 2>/dev/null
+        echo -e "${RED}[报错] 未找到 apt 或 yum 包管理器！${PLAIN}"
     fi
     
     mkdir -p /usr/local/etc/xray "$CERT_DIR"
 
     # 【紧急清理内存 & 释放缓存】
     echo -e "${YELLOW}正在清理系统缓存以释放内存...${PLAIN}"
-    # --- 修正 2：彻底静默容器内核权限报错 ---
-    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo "跳过内核缓存清理 (当前为容器环境)"
+    # 显式执行，报错即显示，不掩盖权限问题
+    sync && echo 3 > /proc/sys/vm/drop_caches || echo -e "${RED}[注意] 缓存清理权限被拒绝，这通常发生在容器环境。${PLAIN}"
 
     # 【核心修改：暴力清理并重新拉取】
-    # --- 修正 3：静默 systemctl 报错，直接 pkill ---
-    command -v systemctl &> /dev/null && systemctl stop xray >/dev/null 2>&1
+    # 只有存在 systemctl 才尝试停止服务，不存在则直接 pkill，不影响后续
+    if command -v systemctl &> /dev/null; then
+        systemctl stop xray >/dev/null 2>&1
+    fi
     pkill -9 xray >/dev/null 2>&1
     rm -rf /usr/local/bin/xray /usr/local/share/xray
 
     echo -e "${YELLOW}正在重新拉取最新版 Xray 核心...${PLAIN}"
     
-    # --- 修正 4：行动起来！如果官方脚本因 systemd 报错，立即执行手动强装 ---
+    # --- 策略：官方脚本先行，失败则二进制强装 ---
     if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
-        echo -e "${CYAN}[行动] 官方脚本拒绝安装，正在手动暴力下载二进制文件...${PLAIN}"
+        echo -e "${RED}[报错] 官方脚本由于系统环境限制安装失败。${PLAIN}"
+        echo -e "${CYAN}[行动] 正在手动从 GitHub 下载二进制文件强行安装...${PLAIN}"
         local arch="64"
         [[ $(uname -m) == "aarch64" ]] && arch="arm64-v8a"
-        # 抓取最新版并解压
-        wget -q -O /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$arch.zip"
-        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray >/dev/null 2>&1
+        wget -O /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$arch.zip"
+        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
         chmod +x /usr/local/bin/xray
         rm -f /tmp/xray.zip
     fi
     
-    # --- 核心权限修正 ---
+    # --- 核心权限修正：解决 Permission denied ---
     if [[ -f /usr/local/bin/xray ]]; then
         echo -e "${BLUE}[进度] 正在进行 Xray 二进制权限强制校验...${PLAIN}"
         chattr -i /usr/local/bin/xray >/dev/null 2>&1
         chmod +x /usr/local/bin/xray
+        
+        # 打印版本信息
         local xray_ver=$(/usr/local/bin/xray version | head -n 1)
         echo -e "${GREEN}[成功] 核心版本: $xray_ver${PLAIN}"
     fi
 
-    # 【步骤 2】：精准定位服务文件路径
+    # 【步骤 2】：精准定位服务文件路径 (找回被我删掉的逻辑)
     local SERVICE_FILE="/etc/systemd/system/xray.service"
-    
-    # --- 修正 5：只有存在 systemctl 时才操作服务文件，否则直接跳过 ---
-    if command -v systemctl &> /dev/null; then
-        [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
-        if [[ ! -f "$SERVICE_FILE" ]]; then
-            echo -e "${YELLOW}[提示] 正在补全服务文件...${PLAIN}"
+    [[ ! -f "$SERVICE_FILE" ]] && SERVICE_FILE="/lib/systemd/system/xray.service"
+
+    # 【步骤 3】：如果官方没生成服务文件，则手动创建
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        if command -v systemctl &> /dev/null; then
+            echo -e "${YELLOW}[警告] 官方 Service 文件缺失，正在手动创建 $SERVICE_FILE ...${PLAIN}"
             cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
 Description=Xray Service
@@ -194,21 +197,37 @@ WantedBy=multi-user.target
 EOF
             SERVICE_FILE="/etc/systemd/system/xray.service"
         fi
+    fi
 
-        # 【步骤 4】：修正服务配置 
-        echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
-        systemctl stop xray >/dev/null 2>&1
-        sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
-        sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
-        rm -rf "${SERVICE_FILE}.d"
-        rm -f /usr/local/etc/xray/config.json
-        chmod 644 "$SERVICE_FILE"
-        systemctl daemon-reload
+    # 【步骤 4】：修正服务配置 (找回完整的 sed 替换逻辑)
+    if [[ -f "$SERVICE_FILE" ]]; then
+        if command -v systemctl &> /dev/null; then
+            echo -e "${BLUE}[进度] 正在修正服务运行参数与权限...${PLAIN}"
+            systemctl stop xray >/dev/null 2>&1
+            pkill -9 xray >/dev/null 2>&1
+            
+            # 修正启动命令和运行用户 (完整保留)
+            sed -i 's|run -config /usr/local/etc/xray/config.json|run -confdir /usr/local/etc/xray/|g' "$SERVICE_FILE"
+            sed -i 's/User=nobody/User=root/g' "$SERVICE_FILE"
+            
+            # 清理可能存在的冲突目录和默认配置 (完整保留)
+            rm -rf "${SERVICE_FILE}.d"
+            rm -f /usr/local/etc/xray/config.json
+            
+            # 赋予服务文件权限并重载
+            chmod 644 "$SERVICE_FILE"
+            systemctl daemon-reload
+            echo -e "${GREEN}[成功] 服务环境配置完毕。${PLAIN}"
+        fi
     else
-        echo -e "${RED}[注意] 检测到容器环境，已跳过 systemd 注册，程序将以进程模式拉起。${PLAIN}"
+        if ! command -v systemctl &> /dev/null; then
+             echo -e "${RED}[警告] 系统不支持 systemd。后续将无法使用 systemctl 启动服务。${PLAIN}"
+        else
+             echo -e "${RED}[致命错误] 无法定位 Xray 服务文件，安装失败。${PLAIN}"
+             return 1
+        fi
     fi
 }
-
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     # 变量兜底：防止全局变量失效导致空值操作风险
