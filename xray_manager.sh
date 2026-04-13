@@ -201,35 +201,39 @@ EOF
     fi
 }
 
-# --- 2. 安装 VLESS+xhttp+TLS (Nginx 深度集成版) ---
+# --- 2. 安装 VLESS+xhttp+TLS (集成 Nginx 伪装版) ---
 install_vless_direct() {
+    # 变量兜底
     [[ -z "$CERT_DIR" ]] && CERT_DIR="/usr/local/etc/xray/certs"
     [[ -z "$XRAY_CONF_DIRECT" ]] && XRAY_CONF_DIRECT="/usr/local/etc/xray/conf_1_direct.json"
     
-    # 1. 基础环境安装
+    # 基础依赖安装
     install_base
-    
-    # 2. 静默安装与初步配置 Nginx (如果 80 没被占用)
-    if lsof -i:80 > /dev/null 2>&1; then
-        echo -e "${YELLOW}[跳过] 80 端口已被占用，可能是 Nginx Proxy Manager 或其他服务。${PLAIN}"
-    else
-        echo -e "${BLUE}[进度] 正在初始化 Nginx 伪装网页...${PLAIN}"
-        mkdir -p /var/www/html
-        echo "<h1>Welcome to my site</h1>" > /var/www/html/index.html
-        systemctl enable nginx && systemctl start nginx
+
+    # --- [新增：Nginx 伪装基础环境] ---
+    echo -e "${BLUE}[进度] 正在配置 Nginx 伪装网页环境...${PLAIN}"
+    mkdir -p /var/www/html
+    echo "<h1>Welcome to nginx!</h1>" > /var/www/html/index.html
+    # 确保 nginx 已安装并尝试开启（如果端口没被占的话）
+    if ! lsof -i:80 > /dev/null 2>&1; then
+        systemctl enable nginx >/dev/null 2>&1
+        systemctl start nginx >/dev/null 2>&1
     fi
 
     echo -e "${CYAN}--- 开始配置 VLESS + xhttp + TLS (兼容 CDN) ---${PLAIN}"
 
-    # 3. 变量生成与用户输入 (完全保留原代码)
+    # --- 变量生成区 (完全保留原代码) ---    
     local r_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_port=$((RANDOM % 55535 + 10000))
     local r_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     local r_fp="chrome"
     local r_alpn="h2,http/1.1"       
 
+    # --- 用户输入区 (完全保留原代码) ---
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
+    
+    echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
     read -p "请输入UUID (回车随机: $r_uuid): " uuid; uuid=${uuid:-$r_uuid}
     read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
@@ -238,20 +242,21 @@ install_vless_direct() {
     read -p "请输入自定义节点名称 (默认: Direct_xHTTP): " node_name
     node_name=${node_name:-"Direct_xHTTP"}    
     
-    echo -e "选择模式: 1.Standalone (推荐) 2.Cloudflare API"
+    echo -e "选择模式: 1.Standalone 2.Cloudflare API"
     read -p "选择 [1-2]: " c_mode
 
-    # 4. 增强版证书申请
-    echo -e "${BLUE}[进度] 正在通过 acme.sh 申请证书...${PLAIN}"
+    echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
+    [[ ! -f /usr/local/bin/xray ]] && bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    rm -rf /etc/systemd/system/xray.service.d && systemctl daemon-reload
+ 
+    # --- 执行安装区 ---
+    echo -e "${BLUE}[进度] 正在处理证书步骤...${PLAIN}"
     if [[ ! -f ~/.acme.sh/acme.sh ]]; then
         curl https://get.acme.sh | sh -s email=admin@$domain
     fi
+    
     local ACME_BIN="$HOME/.acme.sh/acme.sh"
     $ACME_BIN --set-default-ca --server letsencrypt
-
-    # 强制停掉 Nginx 以确保申请证书时 80 端口绝对可用
-    systemctl stop nginx >/dev/null 2>&1
-    pkill -9 nginx >/dev/null 2>&1
 
     if [[ "$c_mode" == "2" ]]; then
         read -p "请输入 CF Email: " cf_e
@@ -260,35 +265,44 @@ install_vless_direct() {
         export CF_Email="$cf_e"
         $ACME_BIN --issue --dns dns_cf -d $domain --force
     else
-        # Standalone 模式申请
-        $ACME_BIN --issue -d $domain --standalone --force --httpport 80
+        # Standalone 模式：如果证书不存在才申请
+        if [[ ! -f ~/.acme.sh/${domain}_ecc/${domain}.key ]]; then
+            # --- [修正：申请前暂时关闭 nginx 释放 80] ---
+            echo -e "${YELLOW}正在释放 80 端口用于证书申请...${PLAIN}"
+            systemctl stop nginx >/dev/null 2>&1
+            $ACME_BIN --issue -d $domain --standalone --force
+            systemctl start nginx >/dev/null 2>&1
+        else
+            # 证书已存在，强行续签/重签时也需要停靠 80
+            systemctl stop nginx >/dev/null 2>&1
+            $ACME_BIN --issue -d $domain --standalone --force
+            systemctl start nginx >/dev/null 2>&1
+        fi
     fi
 
-    # 证书同步与 Nginx 重启
-    if [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
-        echo -e "${GREEN}[成功] 证书获取成功！${PLAIN}"
+    # 路径绝对化检查与同步
+    if [[ -f ~/.acme.sh/${domain}_ecc/${domain}.key ]] && [[ -f ~/.acme.sh/${domain}_ecc/fullchain.cer ]]; then
+        echo -e "${GREEN}[成功] 证书就绪，正在同步至 Xray 目录...${PLAIN}"
         mkdir -p $CERT_DIR
         cp -f ~/.acme.sh/${domain}_ecc/${domain}.key $CERT_DIR/server.key
         cp -f ~/.acme.sh/${domain}_ecc/fullchain.cer $CERT_DIR/server.crt
         chmod 644 $CERT_DIR/server.key $CERT_DIR/server.crt
-        
-        # 证书拿到后，把 Nginx 重新拉起来作为伪装
-        systemctl start nginx >/dev/null 2>&1
     else
-        echo -e "${RED}[致命错误] 证书申请失败。可能原因：${PLAIN}"
-        echo -e "1. 域名解析未生效 (eu.cc 域名解析通常很慢)"
-        echo -e "2. 80 端口仍被占用"
-        echo -e "请检查解析后重试。"
-        # 即使失败也尝试拉起 Nginx
+        echo -e "${RED}[致命错误] 无法获取证书，请检查 API Key 或 DNS 解析是否正确！${PLAIN}"
+        # 即使失败也把 Nginx 开起来，防止机器失联或服务中断
         systemctl start nginx >/dev/null 2>&1
         return 1
     fi
 
-    # 5. 核心配置写入 (IPv6 优先出站)
+    # 处理变量格式化
     local alpn_formatted=$(echo "$alpn" | sed 's/,/","/g')
+    echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
+
+    # 运行网络策略检测
     check_network_strategy
 
-cat <<EOF > $XRAY_CONF_DIRECT
+    # 核心配置写入 (结构完全保留你的版本)
+    cat <<EOF > $XRAY_CONF_DIRECT
 {
     "log": { "loglevel": "warning" },
     "inbounds": [{
@@ -318,27 +332,33 @@ cat <<EOF > $XRAY_CONF_DIRECT
             }
         }
     }],
-    "outbounds": [{
-        "protocol": "freedom",
-        "settings": { "domainStrategy": "$strategy" }
-    }]
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "$strategy"
+            }
+        }
+    ]
 }
 EOF
 
-    # 6. 强力重启
+    # 强力重启逻辑
     systemctl stop xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
     sleep 1
     systemctl start xray
     
+    sleep 2
     if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
+        echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！(Nginx 伪装网页已就绪)${PLAIN}"
         show_node_info
     else
-        echo -e "${RED}[错误] Xray 启动失败，请检查配置。${PLAIN}"
+        echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
+        echo -e "${YELLOW}正在进行配置诊断...${PLAIN}"
         /usr/local/bin/xray -test -config $XRAY_CONF_DIRECT
     fi
-}
+}}
 
 # --- 3. 安装 CF Tunnel (已集成 IPv6 优先与 HTTP2 优化) ---
 install_cf_tunnel() {
