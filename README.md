@@ -3,6 +3,8 @@
 xray-mini 是一款自动化部署脚本。它通过 Systemd 守护进程解决了隧道频繁掉线的痛点，并支持最新的 VLESS + xHTTP 协议，实现极致的隐蔽性与稳定性。
 ### ✨ 核心特性
 
+- 🌍 系统适配：智能检测 Debian/Ubuntu (APT) CentOS Alpine等主流系统。
+
 - 🛡️ 守护进程化：内置 cloudflared 与 Xray 双重 Systemd 守护，进程崩溃 5 秒内自动复活。
 
 - 📡 协议前沿：支持 VLESS + xHTTP (兼容 CDN) 以及 VLESS + WS 隧道模式。
@@ -37,8 +39,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 
 ### ⚠️ 注意事项
 
-**在NAT环境中如果先部署CF Tunnel，当使用API申请证书时隧道会短暂中断**
-
 - NAT环境：由于内存有限，如遇脚本报错断开连结，请多试几次......
 
 - NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。
@@ -46,8 +46,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 - NAT 环境：若使用临时隧道（Option 2），脚本会自动抓取trycloudflare.com域名。
 
 - API 模式：申请证书前请确保`Cloudflare API Key`, `Email`及`域名`已准备就绪。
-
-- 系统要求：推荐使用 Debian 11/12 或 Ubuntu 20.04+。
 
 ### 📁 目录结构
 
