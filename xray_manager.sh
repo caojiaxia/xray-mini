@@ -153,6 +153,60 @@ enable_bbr() {
     fi
     read -p "按回车键返回..."
 }
+
+# 统一重启与冲突校验函数
+restart_and_check() {
+    echo -e "${BLUE}[进度] 正在同步重启服务并进行环境适配...${PLAIN}"
+    
+    local X_BIN="/usr/local/bin/xray"
+    if [[ ! -f "$X_BIN" ]]; then
+        echo -e "${RED}[致命错误] Xray 二进制文件未找到。${PLAIN}"
+        return 1
+    fi
+
+    # 1. 暴力清理旧进程
+    pkill -9 xray >/dev/null 2>&1
+    sleep 1 
+    
+    # 2. 校验配置
+    if ! "$X_BIN" -test -confdir /usr/local/etc/xray/ >/tmp/xray_err.log 2>&1; then
+        echo -e "${RED}[错误] 配置文件校验失败！详细日志：${PLAIN}"
+        cat /tmp/xray_err.log
+        return 1
+    fi
+
+    # 3. 分系统尝试启动
+    local started=false
+    if [ "$HAS_SYSTEMD" = true ]; then
+        systemctl restart xray >/dev/null 2>&1
+        sleep 1
+        pgrep -x "xray" > /dev/null && started=true
+    fi
+
+    if [ "$HAS_OPENRC" = true ] && [ "$started" = false ]; then
+        rc-service xray restart >/dev/null 2>&1
+        sleep 1
+        pgrep -x "xray" > /dev/null && started=true
+    fi
+
+    # 4. 【核心改进】强制兜底逻辑：如果上面都没启动成功 (针对 Docker/NAT 小鸡)
+    if [ "$started" = false ]; then
+        echo -e "${YELLOW}[注意] 标准服务启动受限，尝试使用 nohup 模式拉起...${PLAIN}"
+        nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /var/log/xray.log 2>&1 &
+        sleep 2
+        pgrep -x "xray" > /dev/null && started=true
+    fi
+
+    # 5. 反馈结果
+    if [ "$started" = true ]; then
+        echo -e "${GREEN}[成功] Xray 已在当前环境成功启动。${PLAIN}"
+        return 0
+    else
+        echo -e "${RED}[致命错误] 所有启动方式均失败，请检查端口是否被占用。${PLAIN}"
+        return 1
+    fi
+}
+
 # --- 1. 基础环境安装 ---
 install_base() {
     detect_arch
@@ -370,32 +424,13 @@ EOF
         return 1
     fi
 
-    # 2. 兼容性重启
-    if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl stop xray >/dev/null 2>&1
-        pkill -9 xray >/dev/null 2>&1
-        systemctl start xray
-    else
-        # Alpine/OpenRC 逻辑，增加 nohup 暴力拉起作为最终兜底
-        rc-service xray stop >/dev/null 2>&1
-        pkill -9 xray >/dev/null 2>&1
-        rc-service xray start >/dev/null 2>&1
-        sleep 1
-        if ! pgrep -x "xray" > /dev/null; then
-            echo -e "${YELLOW}OpenRC 启动失败，尝试使用 nohup 强制拉起...${PLAIN}"
-            nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
-        fi
-    fi
-    
-    sleep 2
-    
-    # 3. 最终状态检测
-    if pgrep -x "xray" > /dev/null; then
+    # 直接调用统一重启函数
+    if restart_and_check; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
         show_node_info
     else
         echo -e "${RED}[错误] Xray 启动失败。${PLAIN}"
-        echo -e "${YELLOW}正在进行配置诊断...${PLAIN}"
+        echo -e "${YELLOW}正在诊断配置...${PLAIN}"
         /usr/local/bin/xray -test -confdir /usr/local/etc/xray/
         read -p "按回车键返回..."
     fi
@@ -511,6 +546,9 @@ EOF
         cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header $t_domain run --token $t_token"
     fi
 
+    local cf_started=false
+    
+    # 尝试 Systemd
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
@@ -524,8 +562,9 @@ User=root
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable --now cloudflared
-    else
+        systemctl enable --now cloudflared >/dev/null 2>&1 && cf_started=true
+    # 尝试 OpenRC
+    elif [ "$HAS_OPENRC" = true ]; then
         cat <<EOF > /etc/init.d/cloudflared
 #!/sbin/openrc-run
 command="$CF_BIN"
@@ -536,44 +575,24 @@ depend() { need net; }
 EOF
         chmod +x /etc/init.d/cloudflared
         rc-update add cloudflared default >/dev/null 2>&1
-        rc-service cloudflared restart >/dev/null 2>&1
+        rc-service cloudflared restart >/dev/null 2>&1 && cf_started=true
+    fi
+
+    # 【核心增加】：针对 Docker/NAT 小鸡的万能兜底
+    # 如果标准服务没跑起来，强行用 nohup 拉起 cloudflared
+    sleep 2
+    if ! pgrep -x "cloudflared" > /dev/null; then
+        echo -e "${YELLOW}[注意] 标准隧道服务加载受限，尝试手动拉起隧道...${PLAIN}"
+        pkill -9 cloudflared >/dev/null 2>&1
+        nohup $CF_BIN $cf_cmd > /dev/null 2>&1 &
+        sleep 3
+        pgrep -x "cloudflared" > /dev/null && echo -e "${GREEN}[成功] 隧道已在后台运行。${PLAIN}" || echo -e "${RED}[警告] 隧道拉起失败。${PLAIN}"
     fi
 
     show_node_info
-    echo -e "${GREEN}[成功] 双协议共存已就绪，Host 校验已通过。${PLAIN}"
+    echo -e "${GREEN}[成功] 双协议共存已就绪，隧道与 Xray 状态已同步。${PLAIN}"
 }
-
-# 统一重启与冲突校验函数
-restart_and_check() {
-    echo -e "${BLUE}[进度] 正在同步重启服务并进行双协议共存校验...${PLAIN}"
-    
-    # 路径兜底：脚本最怕找不到文件直接报错
-    local X_BIN="/usr/local/bin/xray"
-    if [[ ! -f "$X_BIN" ]]; then
-        echo -e "${RED}[致命错误] Xray 二进制文件未找到，请检查安装流程。${PLAIN}"
-        return 1
-    fi
-
-    # 1. 暴力清理
-    pkill -9 xray >/dev/null 2>&1
-    sleep 1 
-    
-    # 2. 校验配置 (增加静默校验，失败才报详细错误)
-    if ! "$X_BIN" -test -confdir /usr/local/etc/xray/ >/tmp/xray_err.log 2>&1; then
-        echo -e "${RED}[错误] 配置文件语法校验失败！详细日志：${PLAIN}"
-        cat /tmp/xray_err.log
-        return 1
-    fi
-
-    # 3. 分系统启动
-    if [ "$HAS_SYSTEMD" = true ]; then
-        systemctl restart xray
-    else
-        rc-service xray restart >/dev/null 2>&1 || nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
-    fi
-    echo -e "${GREEN}[成功] 服务已尝试启动。${PLAIN}"
-}
-
+   
 # --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
