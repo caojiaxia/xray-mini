@@ -191,10 +191,13 @@ restart_and_check() {
 
     # 4. 【核心改进】强制兜底逻辑：如果上面都没启动成功 (针对 Docker/NAT 小鸡)
     if [ "$started" = false ]; then
-        echo -e "${YELLOW}[注意] 标准服务启动受限，尝试使用 nohup 模式拉起...${PLAIN}"
-        nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /var/log/xray.log 2>&1 &
-        sleep 2
-        pgrep -x "xray" > /dev/null && started=true
+        nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+        # 给 Alpine 这种“快男”多一点点缓冲时间
+        sleep 3
+        # 使用更原始但更兼容的 ps 方式检测
+        if ps w | grep -v grep | grep -q "xray"; then
+            started=true
+        fi
     fi
 
     # 5. 反馈结果
