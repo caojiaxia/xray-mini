@@ -193,7 +193,7 @@ restart_and_check() {
     if [ "$started" = false ]; then
         nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
         # 给 Alpine 这种“快男”多一点点缓冲时间
-        sleep 3
+        sleep 4
         # 使用更原始但更兼容的 ps 方式检测
         if ps w | grep -v grep | grep -q "xray"; then
             started=true
