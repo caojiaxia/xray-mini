@@ -489,7 +489,7 @@ EOF
     # 7. 重启 Xray
     restart_and_check
 
-    # 8. 持久化 Cloudflared（🔥关键修复在这里）
+    # 8. 持久化 Cloudflared
     local cf_cmd=""
     if [[ "$t_choice" == "1" ]]; then
         cf_cmd="tunnel --logfile $CF_LOG --protocol http2 --http-host-header $t_domain --url http://127.0.0.1:${t_port}"
@@ -754,8 +754,7 @@ ${CYAN}==========================================
  ${YELLOW}4.${PLAIN} 开启 BBR 加速
  ${YELLOW}5.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
  ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
- ${YELLOW}7.${PLAIN} 优化 CF 隧道协议 (HTTP2)
- ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
+ ${YELLOW}7.${PLAIN} 清理系统日志与垃圾
  ${RED}0.${PLAIN} 退出脚本"
         read -p "选择 [0-8]: " choice
         case $choice in
@@ -765,8 +764,7 @@ ${CYAN}==========================================
             4) enable_bbr ;; 
             5) uninstall_menu ;;
             6) setup_cron_job ;;
-            7) update_cf_tunnel_protocol ;;
-            8) cleanup_logs ;;
+            7) cleanup_logs ;;
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
