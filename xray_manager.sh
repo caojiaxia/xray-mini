@@ -177,10 +177,24 @@ install_base() {
     local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
     
     echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
-    wget -O /tmp/xray.zip "$download_url"
-    unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
-    chmod +x /usr/local/bin/xray
-    rm -f /tmp/xray.zip
+wget -O /tmp/xray.zip "$download_url"
+
+# 增加：检查压缩包是否下载成功且大小不为0
+if [[ ! -s /tmp/xray.zip ]]; then
+    echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
+    exit 1
+fi
+
+unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
+rm -f /tmp/xray.zip
+
+# 增加：显式检查解压出的文件是否存在
+if [[ ! -f /usr/local/bin/xray ]]; then
+    echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
+    exit 1
+fi
+
+chmod +x /usr/local/bin/xrayip
 
     # --- 修复内存清理报错：增加权限判断 ---
     echo -e "${YELLOW}尝试清理系统缓存...${PLAIN}"
