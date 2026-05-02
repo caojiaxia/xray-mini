@@ -585,13 +585,27 @@ EOF
     # 如果标准服务没跑起来，强行用 nohup 拉起 cloudflared
     sleep 2
     if ! pgrep -x "cloudflared" > /dev/null; then
-        echo -e "${YELLOW}[注意] 标准隧道服务加载受限，尝试手动拉起隧道...${PLAIN}"
+        echo -e "${YELLOW}[注意] 标准隧道服务加载受限，尝试强制拉起...${PLAIN}"
+        
+        # 清理可能存在的残留或僵死进程
         pkill -9 cloudflared >/dev/null 2>&1
+        sleep 1
+        
+        # 强行后台拉起
         nohup $CF_BIN $cf_cmd > /dev/null 2>&1 &
-        sleep 3
-        pgrep -x "cloudflared" > /dev/null && echo -e "${GREEN}[成功] 隧道已在后台运行。${PLAIN}" || echo -e "${RED}[警告] 隧道拉起失败。${PLAIN}"
+        
+        # 为 Alpine 这种快节奏环境提供充足的初始化时间 ---
+        sleep 5
+        
+        # 使用兼容性更强的 ps 组合校验，替代在容器内有时不稳定的 pgrep
+        if ps w | grep -v grep | grep -q "cloudflared"; then
+            echo -e "${GREEN}[成功] 隧道已在后台强制启动并运行。${PLAIN}"
+        else
+            echo -e "${RED}[警告] 隧道拉起状态校验失败，请稍后手动执行 'ps aux | grep cloudflared' 确认。${PLAIN}"
+        fi
     fi
 
+    # 最终状态展示
     show_node_info
     echo -e "${GREEN}[成功] 双协议共存已就绪，隧道与 Xray 状态已同步。${PLAIN}"
 }
