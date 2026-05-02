@@ -23,6 +23,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/caojiaxia/xray-mini/main/xray_
 ```
 
 ***(Alpine系统请执行以下步骤后再运行脚本)***
+
 **1. 准备与更新软件源索引**
 
 ```
