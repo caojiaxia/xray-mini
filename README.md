@@ -72,7 +72,7 @@ apk add --no-cache bash curl wget jq openssl ca-certificates libc6-compat gcompa
 
 <img width="1409" alt="image" src="https://raw.githubusercontent.com/caojiaxia/xray-mini/refs/heads/main/20.jpg">
 
-- NAT环境：在Alpine系统下部署CF Tunnel时会有如上报错，请无视。如遇节点不通，利用脚本卸载后重新部署即可。***（此报错主要发生在以Docker虚化下的NAT小鸡上）***  
+~~- NAT环境：在Alpine系统下部署CF Tunnel时会有如上报错，请无视。如遇节点不通，利用脚本卸载后重新部署即可。***（此报错主要发生在以Docker虚化下的NAT小鸡上）***~~  已修复...  
   
 - NAT 环境：使用`VLESS+XHTTP+TLS`启用`cloudflare CDN`时，由于端口受限（443系端口可能全被占用），可以使用任意端口，然后登陆 [Cloudflare](https://dash.cloudflare.com/login)部署端口回源。
 
