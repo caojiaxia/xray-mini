@@ -47,8 +47,11 @@ apk add git bash python3
 ```
 apk add git wget python3
 ```
+***（如果觉得麻烦，也可以使用一键更新索引并安装所有必需依赖，不产生本地缓存垃圾）***
 
-
+```
+apk add --no-cache bash curl wget jq openssl ca-certificates libc6-compat gcompat
+```
 
 ### cloudflare tunnel创建
 | 选项        | 说明                                                                      |
