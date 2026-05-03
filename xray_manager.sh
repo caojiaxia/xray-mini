@@ -331,7 +331,7 @@ install_vless_direct() {
     read -p "请输入自定义节点名称 (默认: Direct_xHTTP): " node_name
     node_name=${node_name:-"Direct_xHTTP"}    
     
-    # --- 修改后的竖排选择模式 ---
+    # --- 用户选择 ---
     echo -e "${BLUE}请选择证书申请模式:${PLAIN}"
     echo -e "  1. Standalone (80端口模式)"
     echo -e "  2. Cloudflare API (DNS模式)"
