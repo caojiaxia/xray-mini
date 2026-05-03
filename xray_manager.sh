@@ -212,6 +212,23 @@ restart_and_check() {
 
 # --- 1. 基础环境安装 ---
 install_base() {
+    # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
+    echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
+    # 清理 IPv4
+    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
+    iptables -F && iptables -X && iptables -Z
+    
+    # 清理 IPv6
+    if command -v ip6tables &> /dev/null; then
+        ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
+        ip6tables -F && ip6tables -X && ip6tables -Z
+    fi
+    
+    # 清理 nftables (针对 Debian 12+)
+    if command -v nft &> /dev/null; then
+        nft flush ruleset
+    fi
+
     detect_arch
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
     
