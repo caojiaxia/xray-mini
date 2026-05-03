@@ -345,35 +345,55 @@ install_vless_direct() {
     
     $ACME_BIN --set-default-ca --server letsencrypt
 
-    # >>> 【新插入的代码位置】 <<<
+    # >>> 【优化后的检测逻辑】 <<<
     local skip_acme="n"
-    if [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
-        echo -e "${YELLOW}检测到域名 $domain 已有证书存在。${PLAIN}"
+    local cert_file="$HOME/.acme.sh/${domain}_ecc/fullchain.cer"
+    local key_file="$HOME/.acme.sh/${domain}_ecc/${domain}.key"
+
+    # 只有当 key 和 fullchain 同时存在时，才允许跳过申请
+    if [[ -f "$cert_file" && -f "$key_file" ]]; then
+        echo -e "${YELLOW}检测到域名 $domain 已有完整证书文件。${PLAIN}"
         read -p "是否跳过新申请，直接使用现有证书？[y/n] (默认 y): " skip_acme
         skip_acme=${skip_acme:-y}
+    else
+        # 如果文件不完整，即使 acme.sh 有记录也强制重新申请
+        if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]]; then
+            echo -e "${YELLOW}检测到证书记录不完整，将尝试强制重新申请...${PLAIN}"
+        fi
+        skip_acme="n"
     fi
 
-    if [[ "$skip_acme" == "y" ]]; then
+    if [[ "$skip_acme" == "y" || "$skip_acme" == "Y" ]]; then
         echo -e "${GREEN}跳过申请阶段，直接进入证书同步...${PLAIN}"
     else
-        # 如果不跳过，才执行原来的申请逻辑
+        # 如果不跳过，执行申请逻辑
         if [[ "$c_mode" == "2" ]]; then
             # CF API 模式
             read -p "请输入 CF Email: " cf_e
             read -p "请输入 CF Global API Key: " cf_k
             export CF_Key="$cf_k"
             export CF_Email="$cf_e"
-            $ACME_BIN --issue --dns dns_cf -d $domain --force
+            $ACME_BIN --issue --dns dns_cf -d "$domain" --force
         else
             # Standalone 模式
+            # 1. 强力清理 80 端口，确保 acme.sh 能监听
             if lsof -i:80 > /dev/null 2>&1; then
-                echo -e "${YELLOW}检测到 80 端口占用，尝试停止服务...${PLAIN}"
-                systemctl stop nginx >/dev/null 2>&1
-                rc-service nginx stop >/dev/null 2>&1
-                sleep 1
+                echo -e "${YELLOW}检测到 80 端口占用，正在强制释放...${PLAIN}"
+                lsof -i:80 | awk '{print $2}' | grep -v PID | xargs kill -9 >/dev/null 2>&1
+                sleep 2
             fi
-            $ACME_BIN --issue -d $domain --standalone --force
+            
+            # 2. 申请证书：增加 --listen-v6 以适配你的独立 IPv6 环境
+            echo -e "${BLUE}正在通过 Standalone 模式申请证书 (支持 IPv6)...${PLAIN}"
+            $ACME_BIN --issue -d "$domain" --standalone --httpport 80 --listen-v6 --force
         fi
+    fi
+
+    # >>> 【关键：同步前的二次校验】 <<<
+    if [[ ! -f "$cert_file" ]]; then
+        echo -e "${RED}[致命错误] 证书申请未成功，无法获取 fullchain.cer。${PLAIN}"
+        echo -e "${YELLOW}请检查 80 端口映射是否正确，或尝试使用 DNS API 模式申请。${PLAIN}"
+        exit 1
     fi
 
     # 3. 统一判断申请结果并同步
