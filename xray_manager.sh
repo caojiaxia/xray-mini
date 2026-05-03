@@ -322,7 +322,7 @@ install_vless_direct() {
     read -p "请输入解析域名: " domain
     [[ -z "$domain" ]] && { echo -e "${RED}域名不能为空！${PLAIN}"; return; }
     
-    echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083, 2096)${PLAIN}"
+    echo -e "${YELLOW}注意：若需套 CDN，端口请务必使用 CF 支持的端口 (如 443, 8443, 2053, 2083,2087，2096)${PLAIN}"
     read -p "请输入端口 (回车随机: $r_port): " port; port=${port:-$r_port}
     read -p "请输入UUID (回车随机: $r_uuid): " uuid; uuid=${uuid:-$r_uuid}
     read -p "请输入路径 (回车随机: $r_path): " path; path=${path:-$r_path}
@@ -331,9 +331,13 @@ install_vless_direct() {
     read -p "请输入自定义节点名称 (默认: Direct_xHTTP): " node_name
     node_name=${node_name:-"Direct_xHTTP"}    
     
-    echo -e "选择模式: 1.Standalone 2.Cloudflare API"
-    read -p "选择 [1-2]: " c_mode
-
+    # --- 修改后的竖排选择模式 ---
+    echo -e "${BLUE}请选择证书申请模式:${PLAIN}"
+    echo -e "  1. Standalone (80端口模式)"
+    echo -e "  2. Cloudflare API (DNS模式)"
+    read -p "选择 [1-2] (默认 1): " c_mode
+    c_mode=${c_mode:-1}
+  
     echo -e "${BLUE}[进度] 正在检查 Xray 核心环境...${PLAIN}"
 
 # --- 执行安装区 ---
@@ -491,8 +495,12 @@ install_cf_tunnel() {
     local t_domain=""
 
     # 2. 用户选择
-    echo -e "选择隧道类型: 1.临时隧道 2.固定隧道"
-    read -p "选择 [1-2]: " t_choice
+    echo -e "${BLUE}请选择隧道类型:${PLAIN}"
+    echo -e "  1. 临时隧道 (Quick Tunnel)"
+    echo -e "  2. 固定隧道 (Named Tunnel)"
+    read -p "选择 [1-2] (默认 1): " t_choice
+    t_choice=${t_choice:-1}
+    
     read -p "请输入隧道UUID (回车随机: $r_t_uuid): " t_uuid; t_uuid=${t_uuid:-$r_t_uuid}
     read -p "请输入自定义节点名称 (默认: CF_Tunnel): " t_node_name; t_node_name=${t_node_name:-"CF_Tunnel"}
     read -p "请输入隧道路径 (回车随机: $r_t_path): " t_path; t_path=${t_path:-$r_t_path}
