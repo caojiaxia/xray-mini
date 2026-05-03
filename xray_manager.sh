@@ -214,44 +214,47 @@ restart_and_check() {
 install_base() {
     detect_arch
     echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
+    
+    # 在所有系统的安装列表中增加 unzip
     if grep -qi "alpine" /etc/os-release; then
         # 修复目录缺失
         mkdir -p /var/spool/cron/crontabs
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc >/dev/null 2>&1
+        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
     elif [[ -f /usr/bin/apt ]]; then
-        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools >/dev/null 2>&1
+        # Debian/Ubuntu 增加 unzip
+        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
     else
-        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools >/dev/null 2>&1
+        # CentOS/Yum 增加 unzip
+        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
     fi
     
     check_network_strategy
     mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
-    # --- 修复核心安装：如果是 Alpine，绕过官方脚本执行手动安装 ---
+    # --- 获取最新版 Xray 核心链接 ---
     echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
     local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-    # 根据 detect_arch 得到的 CF_ARCH 匹配下载路径
     local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
     
     echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
-wget -O /tmp/xray.zip "$download_url"
+    wget -O /tmp/xray.zip "$download_url"
 
-# 增加：检查压缩包是否下载成功且大小不为0
-if [[ ! -s /tmp/xray.zip ]]; then
-    echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
-    exit 1
-fi
+    # 检查压缩包是否下载成功
+    if [[ ! -s /tmp/xray.zip ]]; then
+        echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
+        exit 1
+    fi
+    
+    unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
+    rm -f /tmp/xray.zip
 
-unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
-rm -f /tmp/xray.zip
+    # 显式检查解压出的文件是否存在
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
+        exit 1
+    fi
 
-# 增加：显式检查解压出的文件是否存在
-if [[ ! -f /usr/local/bin/xray ]]; then
-    echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
-    exit 1
-fi
-
-chmod +x /usr/local/bin/xrayip
+    chmod +x /usr/local/bin/xray
 
     # --- 修复内存清理报错：增加权限判断 ---
     echo -e "${YELLOW}尝试清理系统缓存...${PLAIN}"
@@ -262,7 +265,7 @@ chmod +x /usr/local/bin/xrayip
     # --- 修复服务文件：仅在 systemd 机器上操作 ---
     if [ "$HAS_SYSTEMD" = true ]; then
         # ... 这里保留你原来的 systemd 写入逻辑 ...
-        echo "Systemd 模式配置略..."
+        echo "Systemd 模式配置已就绪..."
     else
         # Alpine OpenRC 逻辑
         local OPENRC_FILE="/etc/init.d/xray"
