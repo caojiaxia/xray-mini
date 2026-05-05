@@ -370,10 +370,13 @@ update_xray_config() {
         local d_alpn=$(echo "$d_alpn_raw" | sed 's/,/%2C/g')
         local d_path_enc=$(echo "$path" | sed 's/\//%2F/g')
         
-        # 处理 IPv6 域名括号
+        # 强制检测并包裹 IPv6 地址
         local final_host="$domain"
-        [[ "$domain" =~ ":" ]] && [[ ! "$domain" =~ "[" ]] && final_host="[$domain]"
+        if [[ "$domain" =~ ":" ]] && [[ ! "$domain" =~ "[" ]]; then
+            final_host="[$domain]"
+        fi
 
+        # 生成新的链接
         local vless_link="vless://$uuid@$final_host:$port?security=tls&sni=$domain&type=xhttp&mode=auto&path=$d_path_enc&fp=$d_fp&alpn=$d_alpn#$d_name"
 
         echo -e "${BLUE}新配置详情：${PLAIN}"
