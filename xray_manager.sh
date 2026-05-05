@@ -834,6 +834,13 @@ modify_parameters_menu() {
             # 4. 关键：阻塞，防止直接跳回主菜单
             read -p "按回车键返回主菜单..."
             ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}无效选项，返回主菜单...${PLAIN}"
+            sleep 1
+            ;;
     esac
 }
    
