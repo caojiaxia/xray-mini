@@ -784,22 +784,37 @@ modify_parameters_menu() {
             update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
             ;;
         2)
-            echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数${PLAIN}"
+            echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数 (直接回车即跳过)${PLAIN}"
             
-            # 逻辑加固：优先检查是否存在固定域名文件
-            if [[ -f "/usr/local/etc/xray/cf_tunnel_domain" ]]; then
-                # 判定为固定隧道模式
+            # 1. 判定模式并引导输入
+            if [[ -f "/usr/local/etc/xray/cf_tunnel_domain" || "$old_t_choice" == "2" ]]; then
+                # --- 固定隧道模式 ---
+                
+                # A. 先改域名 (门牌号)
+                local current_t_domain=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
+                read -p "请输入隧道对应域名 (当前: ${current_t_domain:-未设置}): " new_t_domain
+                new_t_domain=${new_t_domain:-$current_t_domain}
+
+                # B. 再改 Token (密钥)
                 read -p "请输入新 Token (当前: ${old_t_token:0:10}...): " new_t_token
                 new_t_token=${new_t_token:-$old_t_token}
-                # 同时允许修改路径（满足你灵活修改的需求）
+                
+                # C. 最后是路径
                 read -p "请输入隧道对应路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
                 
+                # 构造启动命令
                 cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
+                
+                # 立即同步域名到本地文件，确保后面生成的链接是正确的
+                if [[ -n "$new_t_domain" ]]; then
+                    echo "$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                fi
             else
-                # 判定为临时隧道模式
+                # --- 临时隧道模式 (只有路径可改) ---
                 read -p "请输入新临时隧道路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
+                new_t_path=${new_t_path:-/}
                 cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}${new_t_path}"
             fi
             
@@ -814,7 +829,7 @@ modify_parameters_menu() {
                 jq ".inbounds[0].streamSettings.wsSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
             fi
 
-            # 3. 【关键修复】强制重启 Xray 服务以应用配置，防止进程僵死
+            # 3. 强制重启 Xray 服务以应用配置，防止进程僵死
             systemctl restart xray > /dev/null 2>&1 || pkill -9 xray && sleep 1 && nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray > /dev/null 2>&1 &
 
             # --- 4. 成功看板输出 ---
