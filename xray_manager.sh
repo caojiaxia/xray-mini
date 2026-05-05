@@ -324,16 +324,36 @@ update_xray_config() {
         .inbounds[0].streamSettings.tlsSettings.serverName = \"$domain\"" \
         "$direct_conf" > "$tmp_file" && mv "$tmp_file" "$direct_conf"
 
-    # 3. 强制重启服务
-    echo -e "${YELLOW}正在强制重启 Xray 服务...${PLAIN}"
-    systemctl restart xray >/dev/null 2>&1 || rc-service xray restart >/dev/null 2>&1
-    sleep 2
+    #  3. 强制重启服务 
+    echo -e "${YELLOW}正在执行物理级重启，确保新配置生效...${PLAIN}"
+    
+    # 尝试标准停止
+    systemctl stop xray >/dev/null 2>&1
+    rc-service xray stop >/dev/null 2>&1
+    sleep 1
 
-    # 二次强制清理检查
-    if ! pgrep -x "xray" > /dev/null; then
+    # 暴力清理残余进程 (针对 128MB 小鸡的顽固进程)
+    if pgrep -x "xray" > /dev/null; then
+        echo -e "${YELLOW}检测到残余进程，执行强杀...${PLAIN}"
         pkill -9 xray >/dev/null 2>&1
-        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
         sleep 2
+    fi
+
+    #  重新启动
+    # 优先使用 nohup 直接拉起，确保在 Alpine 等环境下的稳定性
+    nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+    
+    # 给一点启动时间
+    sleep 3
+
+    # 验证新进程是否运行
+    if pgrep -x "xray" > /dev/null; then
+        echo -e "${GREEN}服务已重新拉起，旧节点已物理断开。${PLAIN}"
+    else
+        echo -e "${RED}[错误] Xray 未能启动，请检查 /usr/local/etc/xray/ 下的 JSON 语法。${PLAIN}"
+        read -p "按回车查看报错日志..."
+        /usr/local/bin/xray test -confdir /usr/local/etc/xray/
+        return
     fi
 
     # 4. 校验并生成 VLESS 链接
