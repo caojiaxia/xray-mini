@@ -785,14 +785,21 @@ modify_parameters_menu() {
             ;;
         2)
             echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数${PLAIN}"
-            if [[ "$old_t_choice" == "2" ]]; then
+            
+            # 逻辑加固：优先检查是否存在固定域名文件
+            if [[ -f "/usr/local/etc/xray/cf_tunnel_domain" ]]; then
+                # 判定为固定隧道模式
                 read -p "请输入新 Token (当前: ${old_t_token:0:10}...): " new_t_token
                 new_t_token=${new_t_token:-$old_t_token}
+                # 同时允许修改路径（满足你灵活修改的需求）
+                read -p "请输入隧道对应路径 (当前: $old_t_path): " new_t_path
+                new_t_path=${new_t_path:-$old_t_path}
+                
                 cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
             else
-                read -p "请输入新隧道路径 (当前: $old_t_path): " new_t_path
+                # 判定为临时隧道模式
+                read -p "请输入新临时隧道路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
-                new_t_path=${new_t_path:-/} # 安全锁：为空则设为根路径
                 cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}${new_t_path}"
             fi
             
