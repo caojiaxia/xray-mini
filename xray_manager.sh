@@ -968,21 +968,31 @@ uninstall_all() {
 get_current_params() {
     local direct_conf="/usr/local/etc/xray/conf_1_direct.json"
     
-    # 探测 Xray 参数
+    # 1. 探测 Xray 节点参数
     if [[ -f "$direct_conf" ]]; then
-        old_domain=$(jq -r '.inbounds[0].streamSettings.tlsSettings.certificates[0].certificateFile' "$direct_conf" | cut -d'/' -f6)
+        # 优先从 host 或 serverName 读取域名，避免 cut 路径出错
+        old_domain=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host // .inbounds[0].streamSettings.tlsSettings.serverName' "$direct_conf")
+        
+        # 如果 jq 没读到，再尝试路径切分 (修正为 f7)
+        if [[ "$old_domain" == "null" || -z "$old_domain" ]]; then
+            old_domain=$(jq -r '.inbounds[0].streamSettings.tlsSettings.certificates[0].certificateFile' "$direct_conf" | cut -d'/' -f7)
+        fi
+        
         old_port=$(jq -r '.inbounds[0].port' "$direct_conf")
         old_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$direct_conf")
-        old_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' "$direct_conf")
+        # 适配你的 xhttpSettings 路径
+        old_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path // .inbounds[0].streamSettings.wsSettings.path' "$direct_conf")
     fi
 
-    # 探测 Cloudflared 参数 (从进程中提取)
+    # 2. 探测 Cloudflared 隧道参数 (从物理进程提取)
     if pgrep -x "cloudflared" > /dev/null; then
         local full_cmd=$(ps w | grep cloudflared | grep -v grep)
         if echo "$full_cmd" | grep -q "token"; then
+            # 提取 Token (固定隧道)
             old_t_token=$(echo "$full_cmd" | sed 's/.*--token \([^ ]*\).*/\1/')
             old_t_choice="2"
         else
+            # 提取 路径 (临时隧道)
             old_t_path=$(echo "$full_cmd" | sed 's/.*http:\/\/127.0.0.1:[0-9]*\([^ ]*\).*/\1/')
             old_t_choice="1"
         fi
