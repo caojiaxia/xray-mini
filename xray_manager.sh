@@ -780,7 +780,7 @@ modify_parameters_menu() {
             read -p "请输入路径 (当前: ${old_path:-未设置}): " new_path
             new_path=${new_path:-$old_path}
 
-            # 执行更新逻辑 (逻辑同前，调用 jq 覆盖并重启)
+            # 执行更新逻辑
             update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
             ;;
         2)
@@ -799,7 +799,7 @@ modify_parameters_menu() {
             pkill -9 cloudflared && sleep 2
             nohup /usr/local/bin/cloudflared $cf_cmd > /dev/null 2>&1 &
             
-            # 2. 同步更新 Xray 的隧道配置文件路径 (确保本地配置与隧道指令一致)
+            # 2. 同步更新 Xray 的隧道配置文件路径
             if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
                 local tmp_t=$(mktemp)
                 jq ".inbounds[0].streamSettings.wsSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
@@ -811,7 +811,6 @@ modify_parameters_menu() {
             echo -e "${GREEN}      CF Tunnel 参数修改成功并重启      ${PLAIN}"
             echo -e "${GREEN}========================================${PLAIN}"
             
-            # 获取当前隧道域名 (从之前保存的文件或进程反推)
             local t_url=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
             local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/conf_2_tunnel.json 2>/dev/null)
             local t_path_enc=$(echo "$new_t_path" | sed 's/\//%2F/g')
@@ -824,14 +823,12 @@ modify_parameters_menu() {
                 echo -e "  UUID: ${t_uuid}"
                 echo -e "${BLUE}----------------------------------------${PLAIN}"
                 echo -e "${YELLOW}新的隧道节点链接 (VLESS + WS + TLS):${PLAIN}"
-                # 按照你的 show_node_info 格式输出链接
                 echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
             else
                 echo -e "${YELLOW}提示：隧道已重启，但由于域名是动态生成的，请稍后在“查看节点信息”中确认链接。${PLAIN}"
             fi
             echo -e "${GREEN}========================================${PLAIN}"
             
-            # 4. 关键：阻塞，防止直接跳回主菜单
             read -p "按回车键返回主菜单..."
             ;;
         0)
