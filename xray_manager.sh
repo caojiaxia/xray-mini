@@ -984,20 +984,32 @@ get_current_params() {
         old_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path // .inbounds[0].streamSettings.wsSettings.path' "$direct_conf")
     fi
 
-    # 2. 探测 Cloudflared 隧道参数 (从物理进程提取)
+    # 2. 探测 Cloudflared 隧道参数 
     if pgrep -x "cloudflared" > /dev/null; then
         local full_cmd=$(ps w | grep cloudflared | grep -v grep)
+        
+        # 探测 A：固定隧道 (Token 模式)
         if echo "$full_cmd" | grep -q "token"; then
-            # 提取 Token (固定隧道)
             old_t_token=$(echo "$full_cmd" | sed 's/.*--token \([^ ]*\).*/\1/')
             old_t_choice="2"
+            # 固定隧道通常在 CF 后台改路径，脚本探测其 Xray 映射路径
+            old_t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path // "/download"' /usr/local/etc/xray/conf_2_tunnel.json)
+        
+        # 探测 B：临时隧道 (URL 模式)
         else
-            # 提取 路径 (临时隧道)
-            old_t_path=$(echo "$full_cmd" | sed 's/.*http:\/\/127.0.0.1:[0-9]*\([^ ]*\).*/\1/')
             old_t_choice="1"
+            # 兼容多种 sed 匹配模式
+            old_t_path=$(echo "$full_cmd" | sed -n 's/.*http:\/\/127.0.0.1:[0-9]*\([^ ]*\).*/\1/p')
+            
+            # 如果 A 失败，尝试从 Xray 隧道配置文件反推路径
+            if [[ -z "$old_t_path" ]]; then
+                old_t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' /usr/local/etc/xray/conf_2_tunnel.json 2>/dev/null)
+            fi
         fi
     fi
-}
+
+    # 兜底：如果还是没拿到路径，给个默认值防止“未设置”
+    old_t_path=${old_t_path:-/}
 
 # --- 5.4 卸载子菜单控制台 ---
 uninstall_menu() {
