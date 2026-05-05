@@ -1045,6 +1045,7 @@ get_current_params() {
 
     # 兜底：如果还是没拿到路径，给个默认值防止“未设置”
     old_t_path=${old_t_path:-/}
+}    
 
 # --- 5.4 卸载子菜单控制台 ---
 uninstall_menu() {
