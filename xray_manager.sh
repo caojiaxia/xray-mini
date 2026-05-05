@@ -302,62 +302,75 @@ EOF
     fi
 }
 
-# [核心执行模块] 负责物理写入、强制重启及链接生成
+# [核心执行模块] 负责物理写入、重启及生成 VLESS 链接
 update_xray_config() {
     local domain=$1 port=$2 uuid=$3 path=$4
     local direct_conf="/usr/local/etc/xray/conf_1_direct.json"
 
-    # 1. 域名变更检查
+    # 1. 域名变更检查 (联动证书申请)
     if [[ "$domain" != "$old_domain" ]]; then
         echo -e "${YELLOW}检测到域名变更，正在更新证书...${PLAIN}"
         issue_cert "$domain"
     fi
 
-    # 2. 安全写入配置
+    # 2. 安全写入配置 (适配 xhttpSettings 路径)
     echo -e "${YELLOW}正在写入新配置到 JSON...${PLAIN}"
     local tmp_file=$(mktemp)
+    # 注意：这里 jq 路径必须匹配你配置文件中的 streamSettings.xhttpSettings
     jq ".inbounds[0].port = $port | 
         .inbounds[0].settings.clients[0].id = \"$uuid\" | 
-        .inbounds[0].streamSettings.wsSettings.path = \"$path\"" \
+        .inbounds[0].streamSettings.xhttpSettings.path = \"$path\" |
+        .inbounds[0].streamSettings.xhttpSettings.host = \"$domain\" |
+        .inbounds[0].streamSettings.tlsSettings.serverName = \"$domain\"" \
         "$direct_conf" > "$tmp_file" && mv "$tmp_file" "$direct_conf"
 
-    # 3. 强制重启服务 (解决不生效问题)
+    # 3. 强制重启服务
     echo -e "${YELLOW}正在强制重启 Xray 服务...${PLAIN}"
-    # 先尝试标准重启
     systemctl restart xray >/dev/null 2>&1 || rc-service xray restart >/dev/null 2>&1
     sleep 2
 
-    # 二次检查：如果没起来，杀掉残余进程再启动
+    # 二次强制清理检查
     if ! pgrep -x "xray" > /dev/null; then
         pkill -9 xray >/dev/null 2>&1
         nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
         sleep 2
     fi
 
-    # 4. 校验与结果展示
+    # 4. 校验并生成 VLESS 链接
     if pgrep -x "xray" > /dev/null; then
         clear
         echo -e "${GREEN}========================================${PLAIN}"
         echo -e "${GREEN}       配置修改成功！节点已生效         ${PLAIN}"
         echo -e "${GREEN}========================================${PLAIN}"
+        
+        # --- 链接生成逻辑 (参考 show_node_info 格式) ---
+        local d_name="${node_name:-Modified_xHTTP}"
+        local d_fp=$(jq -r '.inbounds[0].streamSettings.tlsSettings.fingerprint // "chrome"' "$direct_conf")
+        local d_alpn_raw=$(jq -r '.inbounds[0].streamSettings.tlsSettings.alpn | join(",")' "$direct_conf")
+        local d_alpn=$(echo "$d_alpn_raw" | sed 's/,/%2C/g')
+        local d_path_enc=$(echo "$path" | sed 's/\//%2F/g')
+        
+        # 处理 IPv6 域名括号
+        local final_host="$domain"
+        [[ "$domain" =~ ":" ]] && [[ ! "$domain" =~ "[" ]] && final_host="[$domain]"
+
+        local vless_link="vless://$uuid@$final_host:$port?security=tls&sni=$domain&type=xhttp&mode=auto&path=$d_path_enc&fp=$d_fp&alpn=$d_alpn#$d_name"
+
         echo -e "${BLUE}新配置详情：${PLAIN}"
         echo -e "  域名: ${domain}"
         echo -e "  端口: ${port}"
         echo -e "  UUID: ${uuid}"
         echo -e "  路径: ${path}"
         echo -e "${BLUE}========================================${PLAIN}"
-        
-        # 5. 生成新的链接 (调用你脚本里现有的生成逻辑，这里是示例)
-        local vmess_link="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"${node_name:-Modified_Node}\",\"add\":\"${domain}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${domain}\",\"path\":\"${path}\",\"tls\":\"tls\",\"sni\":\"${domain}\"}" | base64 -w 0)"
-        
-        echo -e "${YELLOW}新的通用链接 (Vmess+WS+TLS):${PLAIN}"
-        echo -e "${CYAN}${vmess_link}${PLAIN}"
+        echo -e "${YELLOW}新的直连链接 (VLESS + xHTTP + TLS):${PLAIN}"
+        echo -e "${CYAN}${vless_link}${PLAIN}"
         echo -e "${BLUE}========================================${PLAIN}"
         
-        # 6. 关键：阻塞提示，防止直接跳回主菜单
+        # 释放内存 (针对 128MB 小鸡)
+        sync && echo 3 > /proc/sys/vm/drop_caches
         read -p "按回车键返回主菜单..."
     else
-        echo -e "${RED}[错误] Xray 重启失败！请检查端口是否被占用或配置错误。${PLAIN}"
+        echo -e "${RED}[错误] Xray 重启失败，配置可能未生效！${PLAIN}"
         read -p "按回车键返回..."
     fi
 }
