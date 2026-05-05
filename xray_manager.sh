@@ -302,6 +302,37 @@ EOF
     fi
 }
 
+# [执行模块] 负责物理写入和重启
+update_xray_config() {
+    local domain=$1 port=$2 uuid=$3 path=$4
+    local direct_conf="/usr/local/etc/xray/conf_1_direct.json"
+
+    # 1. 域名变更检查
+    if [[ "$domain" != "$old_domain" ]]; then
+        echo -e "${YELLOW}域名已变更，准备重新申请证书...${PLAIN}"
+        issue_cert "$domain" # 调用你之前的申请函数
+    fi
+
+    # 2. 安全写入配置 (针对极简系统优化)
+    echo -e "${YELLOW}正在更新 JSON 配置文件...${PLAIN}"
+    local tmp_file=$(mktemp)
+    jq ".inbounds[0].port = $port | 
+        .inbounds[0].settings.clients[0].id = \"$uuid\" | 
+        .inbounds[0].streamSettings.wsSettings.path = \"$path\"" \
+        "$direct_conf" > "$tmp_file" && mv "$tmp_file" "$direct_conf"
+
+    # 3. 重启并验证
+    # 这里建议直接调用你脚本里现有的重启服务逻辑
+    echo -e "${YELLOW}正在重启服务以应用新参数...${PLAIN}"
+    systemctl restart xray >/dev/null 2>&1 || rc-service xray restart >/dev/null 2>&1
+    
+    if /usr/local/bin/xray test -confdir /usr/local/etc/xray/ >/dev/null 2>&1; then
+        echo -e "${GREEN}[成功] 节点参数更新完毕且校验通过！${PLAIN}"
+    else
+        echo -e "${RED}[错误] 配置校验失败，请检查参数合法性。${PLAIN}"
+    fi
+}
+
 # --- 2. 安装 VLESS+xhttp+TLS ---
 install_vless_direct() {
     # 变量兜底：防止全局变量失效导致空值操作风险
@@ -657,6 +688,58 @@ EOF
     show_node_info
     echo -e "${GREEN}[成功] 双协议共存已就绪，隧道与 Xray 状态已同步。${PLAIN}"
 }
+
+# --- 修改参数整合模块 ---
+modify_parameters_menu() {
+    get_current_params # 先探测当前值
+    
+    clear
+    echo -e "${BLUE}==============================${PLAIN}"
+    echo -e "${GREEN}       参数修改配置中心       ${PLAIN}"
+    echo -e "${BLUE}==============================${PLAIN}"
+    echo -e "  1. 修改 Xray 节点参数 (域名/UUID/端口等)"
+    echo -e "  2. 修改 CF Tunnel 参数 (Token/路径等)"
+    echo -e "  0. 返回主菜单"
+    echo -e "${BLUE}==============================${PLAIN}"
+    read -p "请选择操作 [0-2]: " sub_choice
+
+    case $sub_choice in
+        1)
+            echo -e "\n${YELLOW}>>> 修改 Xray 节点参数 (回车即沿用)${PLAIN}"
+            read -p "请输入域名 (当前: ${old_domain:-未设置}): " new_domain
+            new_domain=${new_domain:-$old_domain}
+            read -p "请输入端口 (当前: ${old_port:-未设置}): " new_port
+            new_port=${new_port:-$old_port}
+            read -p "请输入 UUID (当前: ${old_uuid:-未设置}): " new_uuid
+            new_uuid=${new_uuid:-$old_uuid}
+            read -p "请输入路径 (当前: ${old_path:-未设置}): " new_path
+            new_path=${new_path:-$old_path}
+
+            # 执行更新逻辑 (逻辑同前，调用 jq 覆盖并重启)
+            update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
+            ;;
+        2)
+            echo -e "\n${YELLOW}>>> 修改 CF Tunnel 参数 (回车即沿用)${PLAIN}"
+            if [[ "$old_t_choice" == "2" ]]; then
+                read -p "请输入新 Token (当前已加密): " new_t_token
+                new_t_token=${new_t_token:-$old_t_token}
+                cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
+            else
+                read -p "请输入新隧道路径 (当前: ${old_t_path:-未设置}): " new_t_path
+                new_t_path=${new_t_path:-$old_t_path}
+                cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port}${new_t_path}"
+            fi
+            
+            # 重启 CF 隧道 (调用之前修复的 nohup 逻辑)
+            pkill -9 cloudflared && sleep 2
+            nohup $CF_BIN $cf_cmd > /dev/null 2>&1 &
+            echo -e "${GREEN}CF Tunnel 参数已同步并重启。${PLAIN}"
+            ;;
+        *)
+            return
+            ;;
+    esac
+}
    
 # --- 4. 查看当前节点信息与链接  ---
 show_node_info() {
@@ -815,6 +898,32 @@ uninstall_all() {
     echo -e "------------------------------------------------"
     read -p "按回车键返回菜单..."
 }
+
+# --- 自动探测当前运行参数 ---
+get_current_params() {
+    local direct_conf="/usr/local/etc/xray/conf_1_direct.json"
+    
+    # 探测 Xray 参数
+    if [[ -f "$direct_conf" ]]; then
+        old_domain=$(jq -r '.inbounds[0].streamSettings.tlsSettings.certificates[0].certificateFile' "$direct_conf" | cut -d'/' -f6)
+        old_port=$(jq -r '.inbounds[0].port' "$direct_conf")
+        old_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$direct_conf")
+        old_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' "$direct_conf")
+    fi
+
+    # 探测 Cloudflared 参数 (从进程中提取)
+    if pgrep -x "cloudflared" > /dev/null; then
+        local full_cmd=$(ps w | grep cloudflared | grep -v grep)
+        if echo "$full_cmd" | grep -q "token"; then
+            old_t_token=$(echo "$full_cmd" | sed 's/.*--token \([^ ]*\).*/\1/')
+            old_t_choice="2"
+        else
+            old_t_path=$(echo "$full_cmd" | sed 's/.*http:\/\/127.0.0.1:[0-9]*\([^ ]*\).*/\1/')
+            old_t_choice="1"
+        fi
+    fi
+}
+
 # --- 5.4 卸载子菜单控制台 ---
 uninstall_menu() {
     while true; do
@@ -849,20 +958,22 @@ ${CYAN}==========================================
  ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
- ${YELLOW}4.${PLAIN} 开启 BBR 加速
- ${YELLOW}5.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
- ${YELLOW}6.${PLAIN} 开启自动守护 (推荐)
- ${YELLOW}7.${PLAIN} 清理系统日志与垃圾
+ ${YELLOW}4.${PLAIN} 修改配置参数
+ ${YELLOW}5.${PLAIN} 开启 BBR 加速
+ ${YELLOW}6.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
+ ${YELLOW}7.${PLAIN} 开启自动守护 (推荐)
+ ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
  ${RED}0.${PLAIN} 退出脚本"
         read -p "选择 [0-8]: " choice
         case $choice in
             1) install_vless_direct ;;
             2) install_cf_tunnel ;;
             3) show_node_info ;;
-            4) enable_bbr ;; 
-            5) uninstall_menu ;;
-            6) setup_cron_job ;;
-            7) cleanup_logs ;;
+            4) modify_parameters_menu ;;
+            5) enable_bbr ;; 
+            6) uninstall_menu ;;
+            7) setup_cron_job ;;
+            8) cleanup_logs ;;
             0) exit 0 ;;
             *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
         esac
