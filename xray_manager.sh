@@ -754,7 +754,7 @@ EOF
     echo -e "${GREEN}[成功] 双协议共存已就绪，隧道与 Xray 状态已同步。${PLAIN}"
 }
 
-# --- 修改参数整合模块 ---
+# --- 修改参数整合模块  ---
 modify_parameters_menu() {
     get_current_params # 先探测当前值
     
@@ -770,7 +770,7 @@ modify_parameters_menu() {
 
     case $sub_choice in
         1)
-            echo -e "\n${YELLOW}>>> 修改 Xray 节点参数 (回车即沿用)${PLAIN}"
+            echo -e "\n${YELLOW}>>> 修改 Xray 直连节点 (xHTTP) 参数${PLAIN}"
             read -p "请输入域名 (当前: ${old_domain:-未设置}): " new_domain
             new_domain=${new_domain:-$old_domain}
             read -p "请输入端口 (当前: ${old_port:-未设置}): " new_port
@@ -780,32 +780,37 @@ modify_parameters_menu() {
             read -p "请输入路径 (当前: ${old_path:-未设置}): " new_path
             new_path=${new_path:-$old_path}
 
-            # 执行更新逻辑
+            # 调用执行模块 (已包含重启逻辑)
             update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
             ;;
         2)
-            echo -e "\n${YELLOW}>>> 修改 CF Tunnel 参数 (回车即沿用)${PLAIN}"
+            echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数${PLAIN}"
             if [[ "$old_t_choice" == "2" ]]; then
                 read -p "请输入新 Token (当前: ${old_t_token:0:10}...): " new_t_token
                 new_t_token=${new_t_token:-$old_t_token}
                 cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
             else
-                read -p "请输入新临时隧道路径 (当前: $old_t_path): " new_t_path
+                read -p "请输入新隧道路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
+                new_t_path=${new_t_path:-/} # 安全锁：为空则设为根路径
                 cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}${new_t_path}"
             fi
             
-            # 1. 物理级重启 CF
-            pkill -9 cloudflared && sleep 2
+            # 1. 重启 Cloudflared
+            pkill -9 cloudflared && sleep 1
             nohup /usr/local/bin/cloudflared $cf_cmd > /dev/null 2>&1 &
             
-            # 2. 同步更新 Xray 的隧道配置文件路径
+            # 2. 仅修改隧道专用的 JSON，不干扰直连 JSON
             if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
                 local tmp_t=$(mktemp)
+                # 仅针对隧道配置进行写入
                 jq ".inbounds[0].streamSettings.wsSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
             fi
 
-            # --- 3. 新增：成功看板与链接输出 ---
+            # 3. 【关键修复】强制重启 Xray 服务以应用配置，防止进程僵死
+            systemctl restart xray > /dev/null 2>&1 || pkill -9 xray && sleep 1 && nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray > /dev/null 2>&1 &
+
+            # --- 4. 成功看板输出 ---
             clear
             echo -e "${GREEN}========================================${PLAIN}"
             echo -e "${GREEN}      CF Tunnel 参数修改成功并重启      ${PLAIN}"
@@ -820,12 +825,11 @@ modify_parameters_menu() {
                 echo -e "${BLUE}新隧道详情：${PLAIN}"
                 echo -e "  域名: ${t_url}"
                 echo -e "  路径: ${new_t_path}"
-                echo -e "  UUID: ${t_uuid}"
                 echo -e "${BLUE}----------------------------------------${PLAIN}"
                 echo -e "${YELLOW}新的隧道节点链接 (VLESS + WS + TLS):${PLAIN}"
                 echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
             else
-                echo -e "${YELLOW}提示：隧道已重启，但由于域名是动态生成的，请稍后在“查看节点信息”中确认链接。${PLAIN}"
+                echo -e "${YELLOW}提示：服务已重启，请在“查看节点信息”中确认状态。${PLAIN}"
             fi
             echo -e "${GREEN}========================================${PLAIN}"
             
