@@ -302,34 +302,63 @@ EOF
     fi
 }
 
-# [执行模块] 负责物理写入和重启
+# [核心执行模块] 负责物理写入、强制重启及链接生成
 update_xray_config() {
     local domain=$1 port=$2 uuid=$3 path=$4
     local direct_conf="/usr/local/etc/xray/conf_1_direct.json"
 
     # 1. 域名变更检查
     if [[ "$domain" != "$old_domain" ]]; then
-        echo -e "${YELLOW}域名已变更，准备重新申请证书...${PLAIN}"
-        issue_cert "$domain" # 调用你之前的申请函数
+        echo -e "${YELLOW}检测到域名变更，正在更新证书...${PLAIN}"
+        issue_cert "$domain"
     fi
 
-    # 2. 安全写入配置 (针对极简系统优化)
-    echo -e "${YELLOW}正在更新 JSON 配置文件...${PLAIN}"
+    # 2. 安全写入配置
+    echo -e "${YELLOW}正在写入新配置到 JSON...${PLAIN}"
     local tmp_file=$(mktemp)
     jq ".inbounds[0].port = $port | 
         .inbounds[0].settings.clients[0].id = \"$uuid\" | 
         .inbounds[0].streamSettings.wsSettings.path = \"$path\"" \
         "$direct_conf" > "$tmp_file" && mv "$tmp_file" "$direct_conf"
 
-    # 3. 重启并验证
-    # 这里建议直接调用你脚本里现有的重启服务逻辑
-    echo -e "${YELLOW}正在重启服务以应用新参数...${PLAIN}"
+    # 3. 强制重启服务 (解决不生效问题)
+    echo -e "${YELLOW}正在强制重启 Xray 服务...${PLAIN}"
+    # 先尝试标准重启
     systemctl restart xray >/dev/null 2>&1 || rc-service xray restart >/dev/null 2>&1
-    
-    if /usr/local/bin/xray test -confdir /usr/local/etc/xray/ >/dev/null 2>&1; then
-        echo -e "${GREEN}[成功] 节点参数更新完毕且校验通过！${PLAIN}"
+    sleep 2
+
+    # 二次检查：如果没起来，杀掉残余进程再启动
+    if ! pgrep -x "xray" > /dev/null; then
+        pkill -9 xray >/dev/null 2>&1
+        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+        sleep 2
+    fi
+
+    # 4. 校验与结果展示
+    if pgrep -x "xray" > /dev/null; then
+        clear
+        echo -e "${GREEN}========================================${PLAIN}"
+        echo -e "${GREEN}       配置修改成功！节点已生效         ${PLAIN}"
+        echo -e "${GREEN}========================================${PLAIN}"
+        echo -e "${BLUE}新配置详情：${PLAIN}"
+        echo -e "  域名: ${domain}"
+        echo -e "  端口: ${port}"
+        echo -e "  UUID: ${uuid}"
+        echo -e "  路径: ${path}"
+        echo -e "${BLUE}========================================${PLAIN}"
+        
+        # 5. 生成新的链接 (调用你脚本里现有的生成逻辑，这里是示例)
+        local vmess_link="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"${node_name:-Modified_Node}\",\"add\":\"${domain}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${domain}\",\"path\":\"${path}\",\"tls\":\"tls\",\"sni\":\"${domain}\"}" | base64 -w 0)"
+        
+        echo -e "${YELLOW}新的通用链接 (Vmess+WS+TLS):${PLAIN}"
+        echo -e "${CYAN}${vmess_link}${PLAIN}"
+        echo -e "${BLUE}========================================${PLAIN}"
+        
+        # 6. 关键：阻塞提示，防止直接跳回主菜单
+        read -p "按回车键返回主菜单..."
     else
-        echo -e "${RED}[错误] 配置校验失败，请检查参数合法性。${PLAIN}"
+        echo -e "${RED}[错误] Xray 重启失败！请检查端口是否被占用或配置错误。${PLAIN}"
+        read -p "按回车键返回..."
     fi
 }
 
