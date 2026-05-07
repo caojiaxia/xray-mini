@@ -1131,45 +1131,73 @@ ${CYAN}==========================================
 
 # --- 自动守护任务设置 ---
 setup_cron_job() {
-    echo -e "${YELLOW}正在配置自动维护任务 (每分钟检查一次)...${PLAIN}"
+    echo -e "${YELLOW}正在配置全平台自适应维护任务 (每分钟检查一次)...${PLAIN}"
     
     cat <<EOF > /usr/local/bin/xray_keep_alive.sh
 #!/bin/bash
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# OpenRC 兼容层 (Alpine专属)
+# 1. 兼容层：自动识别 OpenRC (Alpine) 或 Systemd (Debian/Ubuntu)
 if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
-    systemctl() {
-        local action=\$1
-        local service=\${2%.service}
-        case "\$action" in
-            start|stop|restart) rc-service "\$service" "\$action" >/dev/null 2>&1 ;;
-            is-active) rc-service "\$service" status 2>/dev/null | grep -q "started" ;;
-            list-unit-files) ls /etc/init.d/ ;;
-            *) return 0 ;;
-        esac
-    }
+    # 此时为 Alpine 环境
+    HAS_SYSTEMCTL=false
+else
+    # 此时为标准 Debian/Ubuntu/CentOS 环境
+    HAS_SYSTEMCTL=true
 fi
 
-if ! systemctl is-active --quiet xray; then
-    echo "\$(date): Xray 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
-    systemctl start xray
+# 2. 内存预处理 (针对 NAT 小机)
+# 如果空闲内存低于 30MB，先清理缓存，防止大内存机器误伤，也救了小内存机器
+free_mem=\$(free -m | awk '/Mem:/ {print \$4}')
+if [ "\$free_mem" -lt 30 ]; then
+    sync && echo 3 > /proc/sys/vm/drop_caches
 fi
 
-if systemctl list-unit-files | grep -q cloudflared; then
-    if ! systemctl is-active --quiet cloudflared; then
-        echo "\$(date): Cloudflared 掉线，正在尝试拉起..." >> /var/log/xray_keep_alive.log
-        systemctl start cloudflared
+# 3. 检查 Xray 状态 (直接检查进程名，这是最可靠的判定方式)
+if ! pgrep -x "xray" > /dev/null; then
+    echo "\$(date): Xray 异常关闭，正在尝试拉起..." >> /var/log/xray_keep_alive.log
+    
+    # 【修复大内存重启问题】: 延迟 5 秒，确保网络栈完全就绪
+    sleep 5
+    
+    if \$HAS_SYSTEMCTL; then
+        # Debian/Ubuntu 使用标准服务重启
+        systemctl restart xray >/dev/null 2>&1
+    else
+        # Alpine 使用 OpenRC 重启
+        rc-service xray restart >/dev/null 2>&1
+    fi
+    
+    # 4. 【暴力兜底】: 如果 5 秒后进程还没起来，说明 Systemd 彻底罢工
+    sleep 5
+    if ! pgrep -x "xray" > /dev/null; then
+        echo "\$(date): 服务管理器启动失败，执行 nohup 强制夺舍..." >> /var/log/xray_keep_alive.log
+        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+    fi
+fi
+
+# 5. 检查 Cloudflared 状态
+if [[ -f "/usr/local/bin/cloudflared" ]]; then
+    if ! pgrep -x "cloudflared" > /dev/null; then
+        if \$HAS_SYSTEMCTL; then
+            systemctl restart cloudflared >/dev/null 2>&1
+        else
+            rc-service cloudflared restart >/dev/null 2>&1
+        fi
     fi
 fi
 EOF
+
     chmod +x /usr/local/bin/xray_keep_alive.sh
 
+    # 写入 crontab，并清理旧任务
     (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
     
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN}  自动守护已开启：每分钟自动检测并拉起服务 ${PLAIN}"
-    echo -e "${GREEN}  运行日志记录在: /var/log/xray_keep_alive.log ${PLAIN}"
+    echo -e "${GREEN}  全兼容优化版守护已开启！                  ${PLAIN}"
+    echo -e "${GREEN}  - 修复了大内存重启后的网络竞争问题         ${PLAIN}"
+    echo -e "${GREEN}  - 保留了小内存机器的内存回收逻辑           ${PLAIN}"
+    echo -e "${GREEN}  - 兼容 Debian 11/12/13 及 Alpine 系统     ${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     read -p "按回车键返回菜单..."
 }
