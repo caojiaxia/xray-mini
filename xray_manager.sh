@@ -1195,8 +1195,8 @@ EOF
     
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e "${GREEN}  全兼容优化版守护已开启！                  ${PLAIN}"
-    echo -e "${GREEN}  - 修复了大内存重启后的网络竞争问题         ${PLAIN}"
-    echo -e "${GREEN}  - 保留了小内存机器的内存回收逻辑           ${PLAIN}"
+    echo -e "${GREEN}  - 优化大内存重启后的网络竞争问题         ${PLAIN}"
+    echo -e "${GREEN}  - 优化小内存机器的内存回收逻辑           ${PLAIN}"
     echo -e "${GREEN}  - 兼容 Debian 11/12/13 及 Alpine 系统     ${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     read -p "按回车键返回菜单..."
