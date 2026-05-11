@@ -131,7 +131,7 @@ cleanup_logs() {
     [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
 }
 
-# --- [ 全兼容内核维护与 BBRv3 模块 ] ---
+# --- [ 全兼容内核维护与 BBR 模块 ] ---
 update_kernel_bbr() {
     clear
     # 1. 状态侦测与回显逻辑 
@@ -140,7 +140,7 @@ update_kernel_bbr() {
     local bbr_status=$(lsmod | grep bbr)
 
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       内核状态与 BBRv3 监控中心                      ${PLAIN}"
+    echo -e "${PURPLE}       内核状态与 BBR 监控中心                      ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
     echo -e "${CYAN} 当前内核版本:${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
     echo -e "${CYAN} TCP控制算法 :${PLAIN} ${GREEN}${current_algo}${PLAIN}"
