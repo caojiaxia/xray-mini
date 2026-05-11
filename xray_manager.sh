@@ -158,9 +158,9 @@ update_services_bbr() {
     echo -e "${CYAN} Cloudflared  :${PLAIN} 本地: ${YELLOW}${cf_local:-未安装}${PLAIN} | 最新: ${GREEN}${cf_remote}${PLAIN}"
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
 
-    echo -e " 1. 开启 BBRv1 加速 (内核级即时生效)"
-    echo -e " 2. 升级 Xray 核心 (覆盖并重启)"
-    echo -e " 3. 升级 Cloudflared (替换二进制)"
+    echo -e " 1. 开启 BBRv1 加速"
+    echo -e " 2. 升级 Xray 核心"
+    echo -e " 3. 升级 Cloudflared"
     echo -e " 4. 一键执行全部操作 (优化+升级)"
     echo -e " 0. 返回主菜单"
     read -p " 请输入编号 [0-4]: " op_choice
