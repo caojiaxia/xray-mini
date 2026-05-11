@@ -134,22 +134,38 @@ cleanup_logs() {
 # --- [ 全兼容内核维护与 BBR 模块 ] ---
 update_kernel_bbr() {
     clear
-    # 1. 状态侦测与回显逻辑 
+    # --- 1. 状态侦测与版本识别逻辑 ---
     local current_kernel=$(uname -r)
     local current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
     local bbr_status=$(lsmod | grep bbr)
+    
+    # 智能识别 BBR 版本
+    local bbr_ver="Unknown"
+    if [[ "$current_algo" == "bbr" ]]; then
+        if [[ "$current_kernel" == *"xanmod"* ]]; then
+            # XanMod 内核 6.4 以后基本都是 v3
+            bbr_ver="v3 (XanMod High Speed)"
+        elif [[ "$current_kernel" =~ ^[6]\.[4-9] ]] || [[ "$current_kernel" =~ ^[7] ]]; then
+            bbr_ver="v3 (Mainline)"
+        elif [[ "$current_kernel" =~ ^[4-5] ]]; then
+            bbr_ver="v1"
+        else
+            bbr_ver="v1/v2"
+        fi
+    fi
 
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       内核状态与 BBR 监控中心                      ${PLAIN}"
+    echo -e "${PURPLE}       内核状态与 BBRv3 监控中心                      ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
     echo -e "${CYAN} 当前内核版本:${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
     echo -e "${CYAN} TCP控制算法 :${PLAIN} ${GREEN}${current_algo}${PLAIN}"
+    echo -e "${CYAN} BBR具体版本 :${PLAIN} ${YELLOW}${bbr_ver}${PLAIN}" # 这里会显示 v1 或 v3
     
-    if [[ -n "$bbr_status" ]]; then
-        echo -e "${CYAN} BBR运行状态 :${PLAIN} ${GREEN}正在运行 (Running)${PLAIN}"
+    if [[ -n "$bbr_status" || "$current_algo" == "bbr" ]]; then
+        echo -e "${CYAN} 运行状态    :${PLAIN} ${GREEN}正在运行 (Running)${PLAIN}"
         echo -e "${GREEN} 提示: 系统已成功开启加速，无需重复操作。${PLAIN}"
     else
-        echo -e "${CYAN} BBR运行状态 :${PLAIN} ${RED}未启动 (Not Running)${PLAIN}"
+        echo -e "${CYAN} 运行状态    :${PLAIN} ${RED}未启动 (Not Running)${PLAIN}"
     fi
     echo -e "${PURPLE}======================================================${PLAIN}"
 
