@@ -1171,7 +1171,7 @@ ${CYAN}==========================================
             2) install_cf_tunnel ;;
             3) show_node_info ;;
             4) modify_parameters_menu ;;
-            5) update_kernel_bbr ;; 
+            5) update_services_bbr ;; 
             6) uninstall_menu ;;
             7) setup_cron_job ;;
             8) cleanup_logs ;;
