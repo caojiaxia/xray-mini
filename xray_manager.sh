@@ -131,27 +131,70 @@ cleanup_logs() {
     [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
 }
 
-# --- [模块: BBR 加速]  ---
-enable_bbr() {
-    echo -e "${BLUE}[进度] 正在检查 BBR 状态...${PLAIN}"
-    if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-        echo -e "${GREEN}[提示] BBR 已经处于开启状态，无需重复操作。${PLAIN}"
-    else
-        echo -e "${YELLOW}正在写入 BBR 配置...${PLAIN}"
-        sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-        sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p > /dev/null 2>&1
-        if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-            echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-            echo -e "${GREEN}  BBR 加速已成功开启！内核已切换为 FQ+BBR${PLAIN}"
-            echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-        else
-            echo -e "${RED}[错误] BBR 开启失败，请检查内核版本是否高于 4.9${PLAIN}"
-        fi
+# --- [ 全兼容内核维护与 BBRv3 模块 ] ---
+update_kernel_bbr() {
+    clear
+    echo -e "${PURPLE}======================================================${PLAIN}"
+    echo -e "${PURPLE}       内核升级与 BBRv3 高性能优化中心                ${PLAIN}"
+    echo -e "${PURPLE}======================================================${PLAIN}"
+
+    # 1. 内存压力预警 (保护 NAT 小机)
+    local mem_total=$(free -m | awk '/Mem:/ {print $2}')
+    if [ "$mem_total" -lt 1024 ]; then
+        echo -e "${RED} [!] 警告: 当前内存为 ${mem_total}MB (低于 1GB)${PLAIN}"
+        echo -e "${RED} [!] 强行更换 BBRv3 内核可能导致 128MB/512MB 的 NAT 机器无法启动！${PLAIN}"
+        echo -e "${YELLOW} >>> 建议：仅使用系统自带内核开启 BBR，不要尝试 XanMod。${PLAIN}"
+        echo -e "${RED}======================================================${PLAIN}"
+        read -p " 确定要冒险继续吗？(风险自担) [y/N]: " risk_confirm
+        [[ "$risk_confirm" != "y" ]] && return
     fi
-    read -p "按回车键返回..."
+
+    # 2. 基础 BBR 参数注入 (全系统通用)
+    echo -e "${YELLOW}正在清理旧配置并注入 BBR 参数...${PLAIN}"
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1
+
+    # 3. 跨平台内核升级分流
+    if [[ -f /etc/debian_version ]]; then
+        # Debian/Ubuntu 路径: 引入 XanMod 获得 BBRv3
+        echo -e "${CYAN}检测到 Debian/Ubuntu，执行 XanMod (BBRv3) 升级流程...${PLAIN}"
+        apt update -y && apt install -y curl gnupg
+        curl -s https://dl.xanmod.org/archive.key | gpg --dearmor -o /usr/share/keyrings/xanmod-archive-keyring.gpg --yes
+        echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main' | tee /etc/apt/sources.list.d/xanmod-release.list
+        apt update -y
+        
+        # 其它大内存机器安装 x64v3 优化版
+        if [ "$mem_total" -gt 2048 ]; then
+            apt install -y linux-xanmod-x64v3
+        else
+            apt install -y linux-xanmod
+        fi
+        apt autoremove -y # NAT 机器的救命稻草
+
+    elif [[ -f /etc/redhat-release ]]; then
+        # CentOS 路径: 升级 ELRepo 主线内核
+        echo -e "${CYAN}检测到 RHEL 系系统，正在同步最新主线内核...${PLAIN}"
+        yum install -y https://www.elrepo.org/elrepo-release-7.el7.elrepo.noarch.rpm 2>/dev/null || \
+        yum install -y https://www.elrepo.org/elrepo-release-8.el8.elrepo.noarch.rpm 2>/dev/null
+        yum --enablerepo=elrepo-kernel install -y kernel-ml
+        grub2-set-default 0
+
+    elif [[ -f /etc/alpine-release ]]; then
+        # Alpine 路径: 虚拟化内核同步
+        echo -e "${CYAN}检测到 Alpine，同步 linux-virt 内核...${PLAIN}"
+        apk add linux-virt
+    fi
+
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}  内核维护与 BBR 优化配置完成！${PLAIN}"
+    echo -e "${YELLOW}  当前运行内核: $(uname -r)${PLAIN}"
+    echo -e "${RED}  注意：必须重启服务器，新内核和 BBRv3 才会生效！${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    read -p "是否现在重启？(y/n): " res
+    [[ "$res" == "y" ]] && reboot
 }
 
 # 统一重启与冲突校验函数
@@ -1108,7 +1151,7 @@ ${CYAN}==========================================
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 修改配置参数
- ${YELLOW}5.${PLAIN} 开启 BBR 加速
+ ${YELLOW}5.${PLAIN} 内核升级与BBR
  ${YELLOW}6.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
  ${YELLOW}7.${PLAIN} 开启自动守护 (推荐)
  ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
@@ -1119,7 +1162,7 @@ ${CYAN}==========================================
             2) install_cf_tunnel ;;
             3) show_node_info ;;
             4) modify_parameters_menu ;;
-            5) enable_bbr ;; 
+            5) update_kernel_bbr ;; 
             6) uninstall_menu ;;
             7) setup_cron_job ;;
             8) cleanup_logs ;;
