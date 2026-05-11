@@ -153,7 +153,7 @@ update_kernel_bbr() {
     fi
 
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       内核版本管理与 BBRv3 监控中心                  ${PLAIN}"
+    echo -e "${PURPLE}       内核版本管理与 BBR 监控中心                  ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
     echo -e "${CYAN} 当前内核版本:${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
     echo -e "${CYAN} TCP控制算法 :${PLAIN} ${GREEN}${current_algo}${PLAIN}"
@@ -169,7 +169,7 @@ update_kernel_bbr() {
     # --- 2. 升级方案选择 ---
     echo -e " 请选择内核维护方案:"
     echo -e "  1. 升级至官方 Backports/Mainline 最新稳定内核 (${YELLOW}推荐：全兼容${PLAIN})"
-    echo -e "  2. 升级至 XanMod 高性能内核 (${CYAN}集成 BBRv3${PLAIN})"
+    echo -e "  2. 升级至 XanMod 高性能内核 (${CYAN}集成 BBR${PLAIN})"
     echo -e "  3. 仅注入 BBR 参数 (${GREEN}不升级内核，仅开启加速${PLAIN})"
     echo -e "  0. 返回主菜单"
     read -p " 请输入编号 [0-3]: " k_choice
