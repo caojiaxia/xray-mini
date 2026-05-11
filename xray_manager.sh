@@ -131,15 +131,21 @@ cleanup_logs() {
     [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
 }
 
-# --- [ 核心模块：主流系统内核同步升级 & BBR 监控中心 ] ---
+# --- [ 核心模块：全平台防御性内核同步升级 & BBR 监控中心 ] ---
 update_kernel_bbr() {
     clear
-    # 1. 采集全系统指纹
+    # 1. 采集全系统指纹 
     local current_kernel=$(uname -r)
     local current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}' 2>/dev/null)
+    local bbr_status=$(lsmod | grep bbr)
     local mem_total=$(free -m | awk '/Mem:/ {print $2}' 2>/dev/null || echo "Unknown")
     
-    # 智能识别 BBR 版本逻辑 (全系统兼容)
+    local os_type="Unknown"
+    [[ -f /etc/debian_version ]] && os_type="Debian"
+    [[ -f /etc/redhat-release ]] && os_type="CentOS"
+    [[ -f /etc/alpine-release ]] && os_type="Alpine"
+
+    # 精准识别 BBR 版本
     local bbr_ver="Unknown"
     if [[ "$current_algo" == "bbr" ]]; then
         if [[ "$current_kernel" == *"xanmod"* ]]; then
@@ -156,69 +162,85 @@ update_kernel_bbr() {
     echo -e "${PURPLE}======================================================${PLAIN}"
     echo -e "${PURPLE}       内核版本管理与 BBR 监控中心 (全系统版)         ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${CYAN} 当前内核版本:${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
-    echo -e "${CYAN} TCP控制算法 :${PLAIN} ${GREEN}${current_algo}${PLAIN}"
-    echo -e "${CYAN} BBR具体版本 :${PLAIN} ${YELLOW}${bbr_ver}${PLAIN}"
+    echo -e "${CYAN} 操作系统   :${PLAIN} ${GREEN}${os_type}${PLAIN}"
+    echo -e "${CYAN} 当前内核   :${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
+    echo -e "${CYAN} TCP控制算法:${PLAIN} ${GREEN}${current_algo}${PLAIN}"
+    echo -e "${CYAN} BBR具体版本:${PLAIN} ${YELLOW}${bbr_ver}${PLAIN}"
+    
+    if [[ -n "$bbr_status" || "$current_algo" == "bbr" ]]; then
+        echo -e "${CYAN} 运行状态    :${PLAIN} ${GREEN}正在运行 (Running)${PLAIN}"
+    else
+        echo -e "${CYAN} 运行状态    :${PLAIN} ${RED}未启动 (Not Running)${PLAIN}"
+    fi
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
 
     echo -e " 请选择内核维护方案:"
-    echo -e "  1. 升级系统内核 (${GREEN}全兼容: Debian/Ubuntu/CentOS/Alpine${PLAIN})"
-    echo -e "  2. 仅开启当前内核 BBR (${YELLOW}不更换内核，适合极小内存机${PLAIN})"
+    echo -e "  1. 升级系统内核 (${GREEN}含全平台修复 & XanMod/ELRepo${PLAIN})"
+    echo -e "  2. 仅开启当前内核 BBR (${YELLOW}不更换内核，适合 NAT 小鸡${PLAIN})"
     echo -e "  0. 返回主菜单"
     read -p " 请输入编号 [0-2]: " k_choice
 
     [[ "$k_choice" == "0" || -z "$k_choice" ]] && return
 
-    # 2. 内核升级核心链路 (针对不同系统执行不同的底层升级)
+    # 2. 内核升级核心链路
     if [[ "$k_choice" == "1" ]]; then
         # 内存压力预警
         if [[ "$mem_total" != "Unknown" && "$mem_total" -lt 1024 ]]; then
-            echo -e "${RED} [!] 警告: 内存过低，升级内核有风险！${PLAIN}"
-            read -p " 是否强制继续？(y/n): " risk_confirm
+            echo -e "${RED} [!] 警告: 内存过低 (${mem_total}MB)，升级内核风险极高！${PLAIN}"
+            read -p " 确认要继续吗？(y/N): " risk_confirm
             [[ "$risk_confirm" != "y" ]] && return
         fi
 
-        echo -e "${YELLOW}正在执行跨平台内核同步流程...${PLAIN}"
+        echo -e "${YELLOW}正在启动全平台内核同步流程...${PLAIN}"
 
-        if [[ -f /etc/debian_version ]]; then
-            # --- Debian / Ubuntu 升级链路 ---
-            echo -e "${CYAN}系统: Debian/Ubuntu | 目标: XanMod 6.x (BBRv3)${PLAIN}"
-            apt update -y && apt install -y curl gnupg
-            curl -s https://dl.xanmod.org/archive.key | gpg --dearmor -o /usr/share/keyrings/xanmod-archive-keyring.gpg --yes
-            echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main' | tee /etc/apt/sources.list.d/xanmod-release.list
+        if [[ "$os_type" == "Debian" ]]; then
+            # --- Debian/Ubuntu  ---
+            echo -e "${CYAN}正在配置 XanMod 仓库并强制修复 GPG 密钥...${PLAIN}"
+            apt update -y && apt install -y curl gnupg2 ca-certificates lsb-release
+            
+            # 方案 A: 证书同步后的正常导入
+            curl -fSsL https://dl.xanmod.org/archive.key | gpg --dearmor --yes -o /usr/share/keyrings/xanmod-archive-keyring.gpg
+            
+            # 方案 B: 针对 NO_PUBKEY 86F7D09EE734E623 的强力捞取逻辑
+            if [ ! -s /usr/share/keyrings/xanmod-archive-keyring.gpg ]; then
+                echo -e "${YELLOW}常规导入失败，尝试从公钥服务器强制拉取 86F7D09EE734E623...${PLAIN}"
+                gpg --no-default-keyring --keyring /usr/share/keyrings/xanmod-archive-keyring.gpg --keyserver keyserver.ubuntu.com --recv-keys 86F7D09EE734E623
+            fi
+
+            echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main" | tee /etc/apt/sources.list.d/xanmod-release.list
             apt update -y
-            # 自动适配 4C4G 高级指令集，小机自动降级
+            
+            # 安装适配 
             apt install -y linux-xanmod-x64v3 || apt install -y linux-xanmod
             apt autoremove -y
 
-        elif [[ -f /etc/redhat-release ]]; then
-            # --- CentOS / RHEL / Alma 升级链路 ---
-            echo -e "${CYAN}系统: CentOS/RHEL | 目标: ELRepo Mainline 6.x${PLAIN}"
-            yum install -y https://www.elrepo.org/elrepo-release-$(rpm -E %rhel).el$(rpm -E %rhel).elrepo.noarch.rpm 2>/dev/null
+        elif [[ "$os_type" == "CentOS" ]]; then
+            # --- CentOS 引导与仓库 ---
+            local rhel_ver=$(rpm -E %rhel)
+            rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+            yum install -y https://www.elrepo.org/elrepo-release-${rhel_ver}.el${rhel_ver}.elrepo.noarch.rpm 2>/dev/null
             yum --enablerepo=elrepo-kernel install -y kernel-ml
-            grub2-set-default 0
+            # 修复引导项
+            [[ -f /sbin/grubby ]] && grubby --set-default=$(ls /boot/vmlinuz-* | sort -V | tail -n 1)
+            [[ -x "$(command -v grub2-set-default)" ]] && grub2-set-default 0
             yum autoremove -y
 
-        elif [[ -f /etc/alpine-release ]]; then
-            # --- Alpine 升级链路 ---
-            echo -e "${CYAN}系统: Alpine | 目标: linux-virt 最新版${PLAIN}"
-            apk add linux-virt
+        elif [[ "$os_type" == "Alpine" ]]; then
+            apk add linux-virt || apk add linux-lts
         fi
     fi
 
-    # 3. 统一注入 BBR 优化参数 (所有系统必经流程)
-    echo -e "${YELLOW}正在注入并应用 BBR 优化参数...${PLAIN}"
-    # 清理冗余配置
+    # 3. 统一注入 BBR 优化参数 (无论内核是否更换，此步骤确保 BBR 开启)
+    echo -e "${YELLOW}正在注入 BBR 优化参数并更新配置...${PLAIN}"
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-    # 写入新配置
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
 
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN}  内核升级与 BBR 优化已完成！${PLAIN}"
-    echo -e "${RED}  必须重启系统，新内核和 BBR 状态才会更新。${PLAIN}"
+    echo -e "${GREEN}  操作已完成！当前运行内核仍为: ${current_kernel}${PLAIN}"
+    echo -e "${RED}  请立刻重启服务器，重启后再次进入此菜单即可看到 v3 状态！${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     read -p "是否现在重启？(y/n): " res
     [[ "$res" == "y" ]] && reboot
