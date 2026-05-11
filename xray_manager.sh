@@ -175,7 +175,7 @@ update_kernel_bbr() {
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
 
     echo -e " 请选择内核维护方案:"
-    echo -e "  1. 升级系统内核 (${GREEN}含全平台修复 & XanMod/ELRepo${PLAIN})"
+    echo -e "  1. 升级系统内核 (${GREEN}全平台 & XanMod/ELRepo${PLAIN})"
     echo -e "  2. 仅开启当前内核 BBR (${YELLOW}不更换内核，适合 NAT 小鸡${PLAIN})"
     echo -e "  0. 返回主菜单"
     read -p " 请输入编号 [0-2]: " k_choice
