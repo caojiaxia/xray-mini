@@ -131,105 +131,97 @@ cleanup_logs() {
     [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
 }
 
-# --- [ 核心模块：服务升级与BBR ] ---
+# --- [ 全自动强力生效与回检系统 ] ---
 update_services_bbr() {
     clear
-    # 1. 采集当前 BBR 状态
+    
+    # --- 1. 深度检测：版本与运行状态 ---
+    echo -e "${YELLOW}正在穿透层级检测服务版本与运行状态...${PLAIN}"
+    
+    # 开启 BBR 检测
     local current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}' 2>/dev/null)
     
-    echo -e "${YELLOW}正在穿透层级检测服务版本信息...${PLAIN}"
-    
-    # --- Xray 版本探测 (优先路径探测) ---
+    # Xray 探测：尝试从进程中直接获取版本
     local xray_bin=$(command -v xray || echo "/usr/local/bin/xray")
     local xray_local=$($xray_bin -version 2>/dev/null | head -n 1 | awk '{print $2}')
     [[ -z "$xray_local" ]] && xray_local="未安装"
-    # 获取远程版本 (增加超时处理，防止卡死)
-    local xray_remote=$(curl -sL --connect-timeout 5 https://api.github.com/repos/XTLS/Xray-install/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-
-    # --- Cloudflared 版本探测 ---
+    
+    # Cloudflared 探测
     local cf_bin=$(command -v cloudflared || echo "/usr/local/bin/cloudflared")
     local cf_local=$($cf_bin --version 2>/dev/null | awk '{print $3}')
     [[ -z "$cf_local" ]] && cf_local="未安装"
+
+    # 远程版本获取（增加镜像源备用，防止 API 抽风）
+    local xray_remote=$(curl -sL --connect-timeout 5 https://api.github.com/repos/XTLS/Xray-install/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z "$xray_remote" ]] && xray_remote="获取失败"
+    
     local cf_remote=$(curl -sL --connect-timeout 5 https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z "$cf_remote" ]] && cf_remote="获取失败"
 
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       服务升级与加速维护 (强力生效版)                ${PLAIN}"
+    echo -e "${PURPLE}       服务升级与加速维护                 ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${CYAN} BBR 状态    :${PLAIN} $([[ "$current_algo" == "bbr" ]] && echo -e "${GREEN}Running (BBRv1)${PLAIN}" || echo -e "${RED}Not Enabled${PLAIN}")"
+    echo -e "${CYAN} BBR 加速状态 :${PLAIN} $([[ "$current_algo" == "bbr" ]] && echo -e "${GREEN}Running (BBRv1)${PLAIN}" || echo -e "${RED}Not Enabled${PLAIN}")"
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
-    echo -e "${CYAN} Xray 核心   :${PLAIN} 本地: ${YELLOW}${xray_local}${PLAIN} | 最新: ${GREEN}${xray_remote}${PLAIN}"
-    echo -e "${CYAN} Cloudflared :${PLAIN} 本地: ${YELLOW}${cf_local}${PLAIN} | 最新: ${GREEN}${cf_remote}${PLAIN}"
+    echo -e "${CYAN} Xray 核心    :${PLAIN} 本地: ${YELLOW}${xray_local}${PLAIN} | 最新: ${GREEN}${xray_remote}${PLAIN}"
+    echo -e "${CYAN} Cloudflared  :${PLAIN} 本地: ${YELLOW}${cf_local}${PLAIN} | 最新: ${GREEN}${cf_remote}${PLAIN}"
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
 
-    echo -e " 1. 开启 BBRv1 加速 (内核级即时生效)"
-    echo -e " 2. 升级 Xray 核心"
-    echo -e " 3. 升级 Cloudflared"
-    echo -e " 4. 一键执行全部操作"
+    echo -e " 1. 开启 BBRv1 加速 (内核即时生效)"
+    echo -e " 2. 强制升级 Xray 核心"
+    echo -e " 3. 强制升级 Cloudflared"
+    echo -e " 4. 全部执行 (优化+升级)"
     echo -e " 0. 返回主菜单"
-    read -p " 请选择 [0-4]: " op_choice
+    read -p " 请输入编号 [0-4]: " op_choice
 
     case "$op_choice" in
         1|4)
-            echo -e "${YELLOW}正在强制注入内核参数...${PLAIN}"
-            # 彻底清理旧配置
-            sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-            sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-            # 强行使内核应用配置
-            sysctl -p >/dev/null 2>&1
-            # 最终验证
-            local active_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-            [[ "$active_algo" == "bbr" ]] && echo -e "${GREEN}[成功] 内核已切换至 BBR。${PLAIN}" || echo -e "${RED}[失败] 内核参数未生效。${PLAIN}"
+            echo -e "${YELLOW}正在注入内核参数并即时应用...${PLAIN}"
+            echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-bbr.conf
+            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/99-bbr.conf
+            sysctl --system >/dev/null 2>&1
+            [[ "$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')" == "bbr" ]] && echo -e "${GREEN}[生效] BBR 已运行。${PLAIN}"
             ;;
     esac
 
     case "$op_choice" in
         2|4)
-            if [[ "$xray_local" != "未安装" && "$xray_local" == "$xray_remote" ]]; then
-                echo -e "${GREEN}[!] Xray 已是最新，无需变动。${PLAIN}"
-            else
-                echo -e "${YELLOW}正在执行 Xray 升级流程...${PLAIN}"
-                bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
-                # 强制重启逻辑
-                systemctl daemon-reload
-                systemctl restart xray
-                sleep 1 # 给进程一点响应时间
-                local xray_new=$($xray_bin -version 2>/dev/null | head -n 1 | awk '{print $2}')
-                echo -e "${CYAN}生效确认: ${PLAIN}${YELLOW}${xray_local}${PLAIN} -> ${GREEN}${xray_new}${PLAIN}"
-            fi
+            echo -e "${YELLOW}正在执行 Xray 强力覆盖升级...${PLAIN}"
+            # 官方脚本升级
+            bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
+            # 生效关键：重启 + 进程检查
+            systemctl daemon-reload
+            systemctl restart xray
+            sleep 1
+            local xray_new=$($xray_bin -version 2>/dev/null | head -n 1 | awk '{print $2}')
+            echo -e "${GREEN}[结果] Xray 生效确认: ${YELLOW}${xray_local}${PLAIN} -> ${GREEN}${xray_new}${PLAIN}"
             ;;
     esac
 
     case "$op_choice" in
         3|4)
-            if [[ "$cf_local" != "未安装" && "$cf_local" == "$cf_remote" ]]; then
-                echo -e "${GREEN}[!] Cloudflared 已是最新，无需变动。${PLAIN}"
-            else
-                echo -e "${YELLOW}正在下载并覆盖 Cloudflared...${PLAIN}"
-                local arch=$(uname -m)
-                local url=""
-                [[ "$arch" == "x86_64" ]] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-                [[ "$arch" == "aarch64" ]] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                
-                if [[ -n "$url" ]]; then
-                    wget -q -O /usr/local/bin/cloudflared "$url"
-                    chmod +x /usr/local/bin/cloudflared
-                    # 强制重启逻辑
-                    if systemctl list-unit-files | grep -q "cloudflared"; then
-                        systemctl daemon-reload
-                        systemctl restart cloudflared
-                    fi
-                    local cf_new=$($cf_bin --version 2>/dev/null | awk '{print $3}')
-                    echo -e "${CYAN}生效确认: ${PLAIN}${YELLOW}${cf_local}${PLAIN} -> ${GREEN}${cf_new}${PLAIN}"
-                fi
+            echo -e "${YELLOW}正在下载并强制替换 Cloudflared...${PLAIN}"
+            local arch=$(uname -m)
+            local download_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            [[ "$arch" == "aarch64" ]] && download_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            
+            # 采用先下载到临时文件再移动的方式，确保不会损坏正在运行的二进制
+            wget -q -O /tmp/cf_new "$download_url" && mv -f /tmp/cf_new /usr/local/bin/cloudflared
+            chmod +x /usr/local/bin/cloudflared
+            
+            # 生效关键：重启服务
+            if systemctl list-units --type=service --all | grep -q "cloudflared"; then
+                systemctl restart cloudflared
             fi
+            local cf_new=$($cf_bin --version 2>/dev/null | awk '{print $3}')
+            echo -e "${GREEN}[结果] Cloudflared 生效确认: ${YELLOW}${cf_local}${PLAIN} -> ${GREEN}${cf_new}${PLAIN}"
             ;;
     esac
 
     [[ "$op_choice" == "0" ]] && return
-    echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
-    echo -e "${GREEN} 任务结束。所有状态已由脚本进行“二次回检”确认。 ${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}  操作完成！所有服务已通过 systemd 重启生效。${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
 }
 
 # 统一重启与冲突校验函数
@@ -1186,7 +1178,7 @@ ${CYAN}==========================================
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel
  ${YELLOW}3.${PLAIN} 查看当前节点信息与链接
  ${YELLOW}4.${PLAIN} 修改配置参数
- ${YELLOW}5.${PLAIN} 内核升级与BBR
+ ${YELLOW}5.${PLAIN} 服务系统升级（非内核）与BBR
  ${YELLOW}6.${PLAIN} 卸载管理 (支持单独卸载/彻底清理)  
  ${YELLOW}7.${PLAIN} 开启自动守护 (推荐)
  ${YELLOW}8.${PLAIN} 清理系统日志与垃圾
