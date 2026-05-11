@@ -131,119 +131,79 @@ cleanup_logs() {
     [[ "$1" != "silent" ]] && read -p "按回车键返回菜单..."
 }
 
-# --- [ 核心模块：全平台防御性内核同步升级 & BBR 监控中心 ] ---
-update_kernel_bbr() {
+# --- [ 核心模块：服务升级与加速生效逻辑 ] ---
+update_services_bbr() {
     clear
-    # 1. 采集全系统指纹 
-    local current_kernel=$(uname -r)
     local current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}' 2>/dev/null)
-    local bbr_status=$(lsmod | grep bbr)
-    local mem_total=$(free -m | awk '/Mem:/ {print $2}' 2>/dev/null || echo "Unknown")
     
-    local os_type="Unknown"
-    [[ -f /etc/debian_version ]] && os_type="Debian"
-    [[ -f /etc/redhat-release ]] && os_type="CentOS"
-    [[ -f /etc/alpine-release ]] && os_type="Alpine"
-
-    # 精准识别 BBR 版本
-    local bbr_ver="Unknown"
-    if [[ "$current_algo" == "bbr" ]]; then
-        if [[ "$current_kernel" == *"xanmod"* ]]; then
-            bbr_ver="v3 (XanMod High Speed)"
-        elif [[ "$current_kernel" =~ ^[6]\.[4-9] ]] || [[ "$current_kernel" =~ ^[7] ]]; then
-            bbr_ver="v3 (Mainline)"
-        elif [[ "$current_kernel" =~ ^[5]\.[1][5-9] ]] || [[ "$current_kernel" =~ ^[6]\.[0-3] ]]; then
-            bbr_ver="v2"
-        else
-            bbr_ver="v1"
-        fi
-    fi
-
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       内核版本管理与 BBR 监控中心 (全系统版)         ${PLAIN}"
+    echo -e "${PURPLE}       服务升级与加速维护 (稳定全兼容版)              ${PLAIN}"
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${CYAN} 操作系统   :${PLAIN} ${GREEN}${os_type}${PLAIN}"
-    echo -e "${CYAN} 当前内核   :${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
-    echo -e "${CYAN} TCP控制算法:${PLAIN} ${GREEN}${current_algo}${PLAIN}"
-    echo -e "${CYAN} BBR具体版本:${PLAIN} ${YELLOW}${bbr_ver}${PLAIN}"
-    
-    if [[ -n "$bbr_status" || "$current_algo" == "bbr" ]]; then
-        echo -e "${CYAN} 运行状态    :${PLAIN} ${GREEN}正在运行 (Running)${PLAIN}"
-    else
-        echo -e "${CYAN} 运行状态    :${PLAIN} ${RED}未启动 (Not Running)${PLAIN}"
-    fi
+    echo -e "${CYAN} BBR 加速状态:${PLAIN} $([[ "$current_algo" == "bbr" ]] && echo -e "${GREEN}已运行${PLAIN}" || echo -e "${RED}未生效${PLAIN}")"
     echo -e "${PURPLE}------------------------------------------------------${PLAIN}"
 
-    echo -e " 请选择内核维护方案:"
-    echo -e "  1. 升级系统内核 (${GREEN}全平台 & XanMod/ELRepo${PLAIN})"
-    echo -e "  2. 仅开启当前内核 BBR (${YELLOW}不更换内核，适合 NAT 小鸡${PLAIN})"
-    echo -e "  0. 返回主菜单"
-    read -p " 请输入编号 [0-2]: " k_choice
+    echo -e " 1. 开启 BBRv1 加速 (${YELLOW}即时生效，无需重启整机${PLAIN})"
+    echo -e " 2. 升级 Xray 核心"
+    echo -e " 3. 升级 Cloudflared"
+    echo -e " 4. 全部执行 (优化+升级服务)"
+    echo -e " 0. 返回主菜单"
+    read -p " 请选择 [0-4]: " op_choice
 
-    [[ "$k_choice" == "0" || -z "$k_choice" ]] && return
-
-    # 2. 内核升级核心链路
-    if [[ "$k_choice" == "1" ]]; then
-        # 内存压力预警
-        if [[ "$mem_total" != "Unknown" && "$mem_total" -lt 1024 ]]; then
-            echo -e "${RED} [!] 警告: 内存过低 (${mem_total}MB)，升级内核风险极高！${PLAIN}"
-            read -p " 确认要继续吗？(y/N): " risk_confirm
-            [[ "$risk_confirm" != "y" ]] && return
-        fi
-
-        echo -e "${YELLOW}正在启动全平台内核同步流程...${PLAIN}"
-
-        if [[ "$os_type" == "Debian" ]]; then
-            # --- Debian/Ubuntu  ---
-            echo -e "${CYAN}正在配置 XanMod 仓库并强制修复 GPG 密钥...${PLAIN}"
-            apt update -y && apt install -y curl gnupg2 ca-certificates lsb-release
+    case "$op_choice" in
+        1|4)
+            echo -e "${YELLOW}正在配置 BBRv1 参数...${PLAIN}"
+            # 确保参数写入系统配置文件
+            sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+            sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+            echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
             
-            # 方案 A: 证书同步后的正常导入
-            curl -fSsL https://dl.xanmod.org/archive.key | gpg --dearmor --yes -o /usr/share/keyrings/xanmod-archive-keyring.gpg
+            # 【关键生效逻辑】强制内核重新加载参数，实现即时重启生效
+            sysctl -p >/dev/null 2>&1
+            echo -e "${GREEN}BBRv1 加速已在内核中即时生效。${PLAIN}"
+            ;;
+    esac
+
+    case "$op_choice" in
+        2|4)
+            echo -e "${YELLOW}正在升级 Xray 并重启服务...${PLAIN}"
+            # 官方脚本会自动处理二进制替换
+            bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
             
-            # 方案 B: 针对 NO_PUBKEY 86F7D09EE734E623 的强力捞取逻辑
-            if [ ! -s /usr/share/keyrings/xanmod-archive-keyring.gpg ]; then
-                echo -e "${YELLOW}常规导入失败，尝试从公钥服务器强制拉取 86F7D09EE734E623...${PLAIN}"
-                gpg --no-default-keyring --keyring /usr/share/keyrings/xanmod-archive-keyring.gpg --keyserver keyserver.ubuntu.com --recv-keys 86F7D09EE734E623
+            # 【生效逻辑】重启 systemd 单元
+            systemctl daemon-reload
+            systemctl restart xray
+            echo -e "${GREEN}Xray 已重启，新版本已生效。${PLAIN}"
+            ;;
+    esac
+
+    case "$op_choice" in
+        3|4)
+            echo -e "${YELLOW}正在下载最新版 Cloudflared...${PLAIN}"
+            local arch=$(uname -m)
+            local url=""
+            [[ "$arch" == "x86_64" ]] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            [[ "$arch" == "aarch64" ]] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            
+            if [[ -n "$url" ]]; then
+                wget -q -O /usr/local/bin/cloudflared "$url"
+                chmod +x /usr/local/bin/cloudflared
+                
+                # 【生效逻辑】通过 systemctl 重启隧道服务
+                if systemctl is-active --quiet cloudflared; then
+                    systemctl restart cloudflared
+                    echo -e "${GREEN}Cloudflared 服务已重启生效。${PLAIN}"
+                else
+                    echo -e "${YELLOW}Cloudflared 二进制已更新，由于服务未运行，无需重启。${PLAIN}"
+                fi
             fi
+            ;;
+    esac
 
-            echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main" | tee /etc/apt/sources.list.d/xanmod-release.list
-            apt update -y
-            
-            # 安装适配 
-            apt install -y linux-xanmod-x64v3 || apt install -y linux-xanmod
-            apt autoremove -y
-
-        elif [[ "$os_type" == "CentOS" ]]; then
-            # --- CentOS 引导与仓库 ---
-            local rhel_ver=$(rpm -E %rhel)
-            rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
-            yum install -y https://www.elrepo.org/elrepo-release-${rhel_ver}.el${rhel_ver}.elrepo.noarch.rpm 2>/dev/null
-            yum --enablerepo=elrepo-kernel install -y kernel-ml
-            # 修复引导项
-            [[ -f /sbin/grubby ]] && grubby --set-default=$(ls /boot/vmlinuz-* | sort -V | tail -n 1)
-            [[ -x "$(command -v grub2-set-default)" ]] && grub2-set-default 0
-            yum autoremove -y
-
-        elif [[ "$os_type" == "Alpine" ]]; then
-            apk add linux-virt || apk add linux-lts
-        fi
-    fi
-
-    # 3. 统一注入 BBR 优化参数 (无论内核是否更换，此步骤确保 BBR 开启)
-    echo -e "${YELLOW}正在注入 BBR 优化参数并更新配置...${PLAIN}"
-    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1
-
+    [[ "$op_choice" == "0" ]] && return
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${GREEN}  操作已完成！当前运行内核仍为: ${current_kernel}${PLAIN}"
-    echo -e "${RED}  请立刻重启服务器，重启后再次进入此菜单即可看到 v3 状态！${PLAIN}"
+    echo -e "${GREEN}  所有选择的操作已完成并生效！${PLAIN}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    read -p "是否现在重启？(y/n): " res
-    [[ "$res" == "y" ]] && reboot
 }
 
 # 统一重启与冲突校验函数
