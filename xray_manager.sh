@@ -134,11 +134,32 @@ cleanup_logs() {
 # --- [ 全兼容内核维护与 BBRv3 模块 ] ---
 update_kernel_bbr() {
     clear
+    # 1. 状态侦测与回显逻辑 
+    local current_kernel=$(uname -r)
+    local current_algo=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    local bbr_status=$(lsmod | grep bbr)
+
     echo -e "${PURPLE}======================================================${PLAIN}"
-    echo -e "${PURPLE}       内核升级与 BBRv3 高性能优化中心                ${PLAIN}"
+    echo -e "${PURPLE}       内核状态与 BBRv3 监控中心                      ${PLAIN}"
+    echo -e "${PURPLE}======================================================${PLAIN}"
+    echo -e "${CYAN} 当前内核版本:${PLAIN} ${GREEN}${current_kernel}${PLAIN}"
+    echo -e "${CYAN} TCP控制算法 :${PLAIN} ${GREEN}${current_algo}${PLAIN}"
+    
+    if [[ -n "$bbr_status" ]]; then
+        echo -e "${CYAN} BBR运行状态 :${PLAIN} ${GREEN}正在运行 (Running)${PLAIN}"
+        echo -e "${GREEN} 提示: 系统已成功开启加速，无需重复操作。${PLAIN}"
+    else
+        echo -e "${CYAN} BBR运行状态 :${PLAIN} ${RED}未启动 (Not Running)${PLAIN}"
+    fi
     echo -e "${PURPLE}======================================================${PLAIN}"
 
-    # 1. 内存压力预警 (保护 NAT 小机)
+    # 询问是否继续，而不是强行重跑
+    echo -e " 1. 强制重新安装/更新内核 (仅在内核损坏或想升级时使用)"
+    echo -e " 2. 返回主菜单"
+    read -p " 请选择 [1-2] (默认2): " status_choice
+    [[ -z "$status_choice" || "$status_choice" == "2" ]] && return
+
+    # 2. 内存压力预警 (保护 NAT 小机)
     local mem_total=$(free -m | awk '/Mem:/ {print $2}')
     if [ "$mem_total" -lt 1024 ]; then
         echo -e "${RED} [!] 警告: 当前内存为 ${mem_total}MB (低于 1GB)${PLAIN}"
@@ -149,7 +170,7 @@ update_kernel_bbr() {
         [[ "$risk_confirm" != "y" ]] && return
     fi
 
-    # 2. 基础 BBR 参数注入 (全系统通用)
+    # 3. 基础 BBR 参数注入 (全系统通用)
     echo -e "${YELLOW}正在清理旧配置并注入 BBR 参数...${PLAIN}"
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
@@ -157,7 +178,7 @@ update_kernel_bbr() {
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
 
-    # 3. 跨平台内核升级分流
+    # 4. 跨平台内核升级分流
     if [[ -f /etc/debian_version ]]; then
         # Debian/Ubuntu 路径: 引入 XanMod 获得 BBRv3
         echo -e "${CYAN}检测到 Debian/Ubuntu，执行 XanMod (BBRv3) 升级流程...${PLAIN}"
