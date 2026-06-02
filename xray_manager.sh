@@ -83,10 +83,9 @@ check_network_strategy() {
     fi
 
     # --- 原有探测逻辑 (仅在资源充足时执行) ---
-    # 优化 IPv6 优先
     if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
-        strategy="PreferIPv6"
-        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式 (PreferIPv6)。${PLAIN}"
+        strategy="UseIPv6"
+        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
     elif curl -4 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
         strategy="UseIPv4"
         echo -e "${YELLOW}[提醒] 环境不支持 IPv6，已切换至 IPv4 优先模式。${PLAIN}"
@@ -94,7 +93,7 @@ check_network_strategy() {
         strategy="AsIs"
         echo -e "${PURPLE}[提醒] 无法确认双栈连接性，使用默认解析策略。${PLAIN}"
     fi
-}}
+}
 
 # ---  自动清理日志与系统垃圾 ---
 cleanup_logs() {
@@ -274,84 +273,66 @@ restart_and_check() {
 
 # --- 1. 基础环境安装 ---
 install_base() {
-    # 修复重复下载逻辑，增加基础依赖包和核心文件存在性检测
-    local needs_dependencies=false
-    for cmd in curl wget jq socat openssl tar lsof unzip; do
-        if ! command -v "$cmd" &>/dev/null; then
-            needs_dependencies=true
-            break
-        fi
-    done
+    # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
+    echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
+    # 清理 IPv4
+    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
+    iptables -F && iptables -X && iptables -Z
+    
+    # 清理 IPv6
+    if command -v ip6tables &> /dev/null; then
+        ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
+        ip6tables -F && ip6tables -X && ip6tables -Z
+    fi
+    
+    # 清理 nftables (针对 Debian 12+)
+    if command -v nft &> /dev/null; then
+        nft flush ruleset
+    fi
 
-    if [ "$needs_dependencies" = true ]; then
-        # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
-        echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
-        # 清理 IPv4
-        iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
-        iptables -F && iptables -X && iptables -Z
-        
-        # 清理 IPv6
-        if command -v ip6tables &> /dev/null; then
-            ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
-            ip6tables -F && ip6tables -X && ip6tables -Z
-        fi
-        
-        # 清理 nftables (针对 Debian 12+)
-        if command -v nft &> /dev/null; then
-            nft flush ruleset
-        fi
-
-        detect_arch
-        echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-        
-        # 在所有系统的安装列表中增加 unzip
-        if grep -qi "alpine" /etc/os-release; then
-            # 修复目录缺失
-            mkdir -p /var/spool/cron/crontabs
-            apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
-        elif [[ -f /usr/bin/apt ]]; then
-            # Debian/Ubuntu 增加 unzip
-            apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
-        else
-            # CentOS/Yum 增加 unzip
-            yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
-        fi
+    detect_arch
+    echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
+    
+    # 在所有系统的安装列表中增加 unzip
+    if grep -qi "alpine" /etc/os-release; then
+        # 修复目录缺失
+        mkdir -p /var/spool/cron/crontabs
+        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
+    elif [[ -f /usr/bin/apt ]]; then
+        # Debian/Ubuntu 增加 unzip
+        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
     else
-        detect_arch
-        echo -e "${GREEN}[跳过] 基础依赖已完整存在，无需重复配置与更新包管理器。${PLAIN}"
+        # CentOS/Yum 增加 unzip
+        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
     fi
     
     check_network_strategy
     mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
     # --- 获取最新版 Xray 核心链接 ---
-    if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
-        local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-        local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
-        
-        echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
-        wget -O /tmp/xray.zip "$download_url"
+    echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
+    local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
+    local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
+    
+    echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
+    wget -O /tmp/xray.zip "$download_url"
 
-        # 检查压缩包是否下载成功
-        if [[ ! -s /tmp/xray.zip ]]; then
-            echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
-            exit 1
-        fi
-        
-        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
-        rm -f /tmp/xray.zip
-
-        # 显式检查解压出的文件是否存在
-        if [[ ! -f /usr/local/bin/xray ]]; then
-            echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
-            exit 1
-        fi
-
-        chmod +x /usr/local/bin/xray
-    else
-        echo -e "${GREEN}[跳过] Xray 核心文件已存在，无需重复下载。${PLAIN}"
+    # 检查压缩包是否下载成功
+    if [[ ! -s /tmp/xray.zip ]]; then
+        echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
+        exit 1
     fi
+    
+    unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
+    rm -f /tmp/xray.zip
+
+    # 显式检查解压出的文件是否存在
+    if [[ ! -f /usr/local/bin/xray ]]; then
+        echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
+        exit 1
+    fi
+
+    chmod +x /usr/local/bin/xray
 
     # --- 修复内存清理报错：增加权限判断 ---
     echo -e "${YELLOW}尝试清理系统缓存...${PLAIN}"
@@ -590,7 +571,7 @@ install_vless_direct() {
         return 1
     fi
 
-    # ALPN 格式化，xhttp 模式下直接处理成 JSON 数组字符串
+    # 【修复重点】：ALPN 格式化，xhttp 模式下直接处理成 JSON 数组字符串
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')
 
     echo -e "${BLUE}[进度] 正在写入核心配置 (IPv6 优先出站模式)...${PLAIN}"
@@ -1290,4 +1271,3 @@ case "$1" in
         main_menu
         ;;
 esac
-
