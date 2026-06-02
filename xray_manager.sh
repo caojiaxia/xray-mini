@@ -83,9 +83,10 @@ check_network_strategy() {
     fi
 
     # --- 原有探测逻辑 (仅在资源充足时执行) ---
+    # 【修改项 1】：优化 IPv6 优先
     if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
-        strategy="UseIPv6"
-        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
+        strategy="PreferIPv6"
+        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式 (PreferIPv6)。${PLAIN}"
     elif curl -4 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
         strategy="UseIPv4"
         echo -e "${YELLOW}[提醒] 环境不支持 IPv6，已切换至 IPv4 优先模式。${PLAIN}"
@@ -273,66 +274,84 @@ restart_and_check() {
 
 # --- 1. 基础环境安装 ---
 install_base() {
-    # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
-    echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
-    # 清理 IPv4
-    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
-    iptables -F && iptables -X && iptables -Z
-    
-    # 清理 IPv6
-    if command -v ip6tables &> /dev/null; then
-        ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
-        ip6tables -F && ip6tables -X && ip6tables -Z
-    fi
-    
-    # 清理 nftables (针对 Debian 12+)
-    if command -v nft &> /dev/null; then
-        nft flush ruleset
-    fi
+    # 【修改项 2】：修复重复下载逻辑，增加基础依赖包和核心文件存在性检测
+    local needs_dependencies=false
+    for cmd in curl wget jq socat openssl tar lsof unzip; do
+        if ! command -v "$cmd" &>/dev/null; then
+            needs_dependencies=true
+            break
+        fi
+    done
 
-    detect_arch
-    echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    
-    # 在所有系统的安装列表中增加 unzip
-    if grep -qi "alpine" /etc/os-release; then
-        # 修复目录缺失
-        mkdir -p /var/spool/cron/crontabs
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
-    elif [[ -f /usr/bin/apt ]]; then
-        # Debian/Ubuntu 增加 unzip
-        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
+    if [ "$needs_dependencies" = true ]; then
+        # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
+        echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
+        # 清理 IPv4
+        iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
+        iptables -F && iptables -X && iptables -Z
+        
+        # 清理 IPv6
+        if command -v ip6tables &> /dev/null; then
+            ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
+            ip6tables -F && ip6tables -X && ip6tables -Z
+        fi
+        
+        # 清理 nftables (针对 Debian 12+)
+        if command -v nft &> /dev/null; then
+            nft flush ruleset
+        fi
+
+        detect_arch
+        echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
+        
+        # 在所有系统的安装列表中增加 unzip
+        if grep -qi "alpine" /etc/os-release; then
+            # 修复目录缺失
+            mkdir -p /var/spool/cron/crontabs
+            apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
+        elif [[ -f /usr/bin/apt ]]; then
+            # Debian/Ubuntu 增加 unzip
+            apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
+        else
+            # CentOS/Yum 增加 unzip
+            yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
+        fi
     else
-        # CentOS/Yum 增加 unzip
-        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
+        detect_arch
+        echo -e "${GREEN}[跳过] 基础依赖已完整存在，无需重复配置与更新包管理器。${PLAIN}"
     fi
     
     check_network_strategy
     mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
     # --- 获取最新版 Xray 核心链接 ---
-    echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
-    local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-    local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
-    
-    echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
-    wget -O /tmp/xray.zip "$download_url"
-
-    # 检查压缩包是否下载成功
-    if [[ ! -s /tmp/xray.zip ]]; then
-        echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
-        exit 1
-    fi
-    
-    unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
-    rm -f /tmp/xray.zip
-
-    # 显式检查解压出的文件是否存在
     if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
-        exit 1
-    fi
+        echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
+        local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
+        local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
+        
+        echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
+        wget -O /tmp/xray.zip "$download_url"
 
-    chmod +x /usr/local/bin/xray
+        # 检查压缩包是否下载成功
+        if [[ ! -s /tmp/xray.zip ]]; then
+            echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
+            exit 1
+        fi
+        
+        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
+        rm -f /tmp/xray.zip
+
+        # 显式检查解压出的文件是否存在
+        if [[ ! -f /usr/local/bin/xray ]]; then
+            echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
+            exit 1
+        fi
+
+        chmod +x /usr/local/bin/xray
+    else
+        echo -e "${GREEN}[跳过] Xray 核心文件已存在，无需重复下载。${PLAIN}"
+    fi
 
     # --- 修复内存清理报错：增加权限判断 ---
     echo -e "${YELLOW}尝试清理系统缓存...${PLAIN}"
@@ -643,7 +662,7 @@ EOF
 # --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS + Host 强校验模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- 开始配置 CF Tunnel (XHTTP 强校验模式) ---${PLAIN}"
 
     # 1. 变量初始化
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -712,7 +731,7 @@ install_cf_tunnel() {
         echo "$t_domain" > /usr/local/etc/xray/cf_tunnel_domain
     fi
 
-    # 6. 写入 Xray 配置
+    # 6. 写入 Xray 配置 (【修改项 3】: 将 ws 迁移至 xhttp 架构)
     echo -e "${BLUE}[进度] 正在写入 Xray 隧道配置并绑定 Host...${PLAIN}"
     cat <<EOF > "/usr/local/etc/xray/conf_2_tunnel.json"
 {
@@ -726,13 +745,12 @@ install_cf_tunnel() {
             "decryption": "none"
         },
         "streamSettings": {
-            "network": "ws",
+            "network": "xhttp",
             "security": "none",
-            "wsSettings": {
+            "xhttpSettings": {
                 "path": "$t_path",
-                "headers": {
-                    "Host": "$t_domain"
-                }
+                "mode": "auto",
+                "host": "$t_domain"
             }
         },
         "sniffing": {
@@ -883,11 +901,14 @@ modify_parameters_menu() {
             pkill -9 cloudflared && sleep 1
             nohup /usr/local/bin/cloudflared $cf_cmd > /dev/null 2>&1 &
             
-            # 2. 仅修改隧道专用的 JSON，不干扰直连 JSON
+            # 2. 仅修改隧道专用的 JSON，不干扰直连 JSON (【修改项 3】同步修改 xhttpSettings 的 path 与 host)
             if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
                 local tmp_t=$(mktemp)
-                # 仅针对隧道配置进行写入
-                jq ".inbounds[0].streamSettings.wsSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
+                if [[ -n "$new_t_domain" ]]; then
+                    jq ".inbounds[0].streamSettings.xhttpSettings.path = \"$new_t_path\" | .inbounds[0].streamSettings.xhttpSettings.host = \"$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
+                else
+                    jq ".inbounds[0].streamSettings.xhttpSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
+                fi
             fi
 
             # 3. 强制重启 Xray 服务以应用配置，防止进程僵死
@@ -909,8 +930,8 @@ modify_parameters_menu() {
                 echo -e "  域名: ${t_url}"
                 echo -e "  路径: ${new_t_path}"
                 echo -e "${BLUE}----------------------------------------${PLAIN}"
-                echo -e "${YELLOW}新的隧道节点链接 (VLESS + WS + TLS):${PLAIN}"
-                echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
+                echo -e "${YELLOW}新的隧道节点链接 (VLESS + xHTTP + TLS):${PLAIN}"
+                echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=auto&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
             else
                 echo -e "${YELLOW}提示：服务已重启，请在“查看节点信息”中确认状态。${PLAIN}"
             fi
@@ -953,20 +974,21 @@ show_node_info() {
         echo -e "------------------------------------------------"
     fi
 
-    # --- 2. 处理隧道节点 (CF Tunnel + WS) ---
+    # --- 2. 处理隧道节点 (CF Tunnel + XHTTP) --- (【修改项 3】: 将 ws 信息读取变更为 xhttp)
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
         local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
-        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
+        local t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_TUNNEL)
         # 【修复】：读取持久化路径
         local t_url=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
         local t_alpn="h2%2Chttp%2F1.1"
         local t_path_enc=$(echo "$t_path" | sed 's/\//%2F/g')
         
         echo -e "${PURPLE}[节点: $t_name]${PLAIN}"
+   
         if [[ -n "$t_url" ]]; then
-            # 【修复】：使用编码后的 t_alpn
-            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$t_path_enc&fp=chrome&alpn=$t_alpn#$t_name${PLAIN}"
+            # 【修改项 3】：生成正确的 xhttp 格式链接
+            echo -e "  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=auto&path=$t_path_enc&fp=chrome&alpn=$t_alpn#$t_name${PLAIN}"
         else
             echo -e "  ${RED}错误: 未找到隧道域名，请检查 cloudflared 是否运行正常${PLAIN}"
         fi
@@ -975,6 +997,7 @@ show_node_info() {
 
     read -p "按回车键返回菜单..."
 }
+
 # --- 5.1 仅卸载 Xray (保留 CF Tunnel) ---
 uninstall_xray() {
     echo -e "${RED}警告：此操作将仅卸载 Xray 核心、直连节点配置及证书。${PLAIN}"
@@ -1073,6 +1096,7 @@ uninstall_all() {
 
     echo -e "${YELLOW}[5/5] 正在释放守护任务与系统别名...${PLAIN}"
     rm -f /usr/local/bin/xray_keep_alive.sh
+ 
     # 清理 Crontab
     crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh|cleanup_logs" | crontab - >/dev/null 2>&1
     
@@ -1114,8 +1138,8 @@ get_current_params() {
         if echo "$full_cmd" | grep -q "token"; then
             old_t_token=$(echo "$full_cmd" | sed 's/.*--token \([^ ]*\).*/\1/')
             old_t_choice="2"
-            # 固定隧道通常在 CF 后台改路径，脚本探测其 Xray 映射路径
-            old_t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path // "/download"' /usr/local/etc/xray/conf_2_tunnel.json)
+            # (【修改项 3】: 将旧版的 wsSettings 探测改写为 xhttpSettings 兼容探测)
+            old_t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path // "/download"' /usr/local/etc/xray/conf_2_tunnel.json)
         
         # 探测 B：临时隧道 (URL 模式)
         else
@@ -1125,7 +1149,7 @@ get_current_params() {
             
             # 如果 A 失败，尝试从 Xray 隧道配置文件反推路径
             if [[ -z "$old_t_path" ]]; then
-                old_t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' /usr/local/etc/xray/conf_2_tunnel.json 2>/dev/null)
+                old_t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' /usr/local/etc/xray/conf_2_tunnel.json 2>/dev/null)
             fi
         fi
     fi
@@ -1244,6 +1268,20 @@ if [[ -f "/usr/local/bin/cloudflared" ]]; then
             systemctl restart cloudflared >/dev/null 2>&1
         else
             rc-service cloudflared restart >/dev/null 2>&1
+        fi
+        
+        # 【修改项 4】：针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名并热同步给 xHTTP 配置
+        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null && ! grep -q "run --token" /etc/init.d/cloudflared 2>/dev/null; then
+            sleep 8
+            new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
+            if [[ -n "\$new_t_domain" ]]; then
+                echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                # 同步修改 xhttpSettings 的 host 头
+                tmp_j=\$(mktemp)
+                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
+                # 重载 Xray 节点使其生效
+                if \$HAS_SYSTEMCTL; then systemctl restart xray; else rc-service xray restart; fi
+            fi
         fi
     fi
 fi
