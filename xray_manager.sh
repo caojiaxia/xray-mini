@@ -1209,40 +1209,54 @@ ${CYAN}==========================================
     done
 }
 
-# --- 自动守护任务设置 (修复核心：如果是 Quick Tunnel 临时隧道，重启后自动重新抓取生成新域名并热重载 Xray) ---
+# --- 自动守护任务设置 ---
 setup_cron_job() {
-    [[ "$1" != "silent" ]] && echo -e "${YELLOW}正在配置自适应高维维护守护任务...${PLAIN}"
+    echo -e "${YELLOW}正在配置全平台自适应维护任务 (每分钟检查一次)...${PLAIN}"
     
     cat <<EOF > /usr/local/bin/xray_keep_alive.sh
 #!/bin/bash
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# 1. 兼容层：自动识别 OpenRC (Alpine) 或 Systemd (Debian/Ubuntu)
 if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
+    # 此时为 Alpine 环境
     HAS_SYSTEMCTL=false
 else
+    # 此时为标准 Debian/Ubuntu/CentOS 环境
     HAS_SYSTEMCTL=true
 fi
 
-# 内存低时回收
+# 2. 内存预处理 (针对 NAT 小机)
+# 如果空闲内存低于 30MB，先清理缓存，防止大内存机器误伤，也救了小内存机器
 free_mem=\$(free -m | awk '/Mem:/ {print \$4}')
 if [ "\$free_mem" -lt 30 ]; then
     sync && echo 3 > /proc/sys/vm/drop_caches
 fi
 
-# 1. 守护 Xray 核心
+# 3. 检查 Xray 状态 (直接检查进程名，这是最可靠的判定方式)
 if ! pgrep -x "xray" > /dev/null; then
+    echo "\$(date): Xray 异常关闭，正在尝试拉起..." >> /var/log/xray_keep_alive.log
+    
+    # 【修复大内存重启问题】: 延迟 5 秒，确保网络栈完全就绪
+    sleep 5
+    
     if \$HAS_SYSTEMCTL; then
+        # Debian/Ubuntu 使用标准服务重启
         systemctl restart xray >/dev/null 2>&1
     else
+        # Alpine 使用 OpenRC 重启
         rc-service xray restart >/dev/null 2>&1
     fi
-    sleep 3
+    
+    # 4. 【暴力兜底】: 如果 5 秒后进程还没起来，说明 Systemd 彻底罢工
+    sleep 5
     if ! pgrep -x "xray" > /dev/null; then
+        echo "\$(date): 服务管理器启动失败，执行 nohup 强制夺舍..." >> /var/log/xray_keep_alive.log
         nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
     fi
 fi
 
-# 2. 守护 Cloudflared 并对临时隧道实现【变动域名自适应热修正】
+# 5. 检查 Cloudflared 状态
 if [[ -f "/usr/local/bin/cloudflared" ]]; then
     if ! pgrep -x "cloudflared" > /dev/null; then
         if \$HAS_SYSTEMCTL; then
@@ -1251,17 +1265,17 @@ if [[ -f "/usr/local/bin/cloudflared" ]]; then
             rc-service cloudflared restart >/dev/null 2>&1
         fi
         
-        # 针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名
-        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null; then
+        # 【修改项 4】：针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名并热同步给 xHTTP 配置
+        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null && ! grep -q "run --token" /etc/init.d/cloudflared 2>/dev/null; then
             sleep 8
             new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
             if [[ -n "\$new_t_domain" ]]; then
                 echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
-                # 同步修改配置文件中的 Host 头
+                # 同步修改 xhttpSettings 的 host 头
                 tmp_j=\$(mktemp)
-                jq ".inbounds[0].streamSettings.wsSettings.headers.Host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
-                # 重载 Xray 节点
-                if \$HAS_SYSTEMCTL; then systemctl restart xray; else pkill -9 xray; fi
+                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
+                # 重载 Xray 节点使其生效
+                if \$HAS_SYSTEMCTL; then systemctl restart xray; else rc-service xray restart; fi
             fi
         fi
     fi
@@ -1269,12 +1283,17 @@ fi
 EOF
 
     chmod +x /usr/local/bin/xray_keep_alive.sh
+
+    # 写入 crontab，并清理旧任务
     (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
     
-    # 额外在 crontab 中追加开机自启强拉动作（针对无 systemd 环境双保险）
-    (crontab -l 2>/dev/null | grep -v "reboot /usr/local/bin/xray_keep_alive.sh"; echo "@reboot /usr/local/bin/xray_keep_alive.sh") | crontab -
-
-    [[ "$1" != "silent" ]] && echo -e "${GREEN}维护守护任务配置成功！已解决开机断流与闪退问题。${PLAIN}" && read -p "按回车返回..."
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${GREEN}  全兼容优化版守护已开启！                  ${PLAIN}"
+    echo -e "${GREEN}  - 优化大内存重启后的网络竞争问题         ${PLAIN}"
+    echo -e "${GREEN}  - 优化小内存机器的内存回收逻辑           ${PLAIN}"
+    echo -e "${GREEN}  - 兼容 Debian 11/12/13 及 Alpine 系统     ${PLAIN}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    read -p "按回车键返回菜单..."
 }
 
 case "$1" in
