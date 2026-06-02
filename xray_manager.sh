@@ -1264,20 +1264,6 @@ if [[ -f "/usr/local/bin/cloudflared" ]]; then
         else
             rc-service cloudflared restart >/dev/null 2>&1
         fi
-        
-        # 【修改项 4】：针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名并热同步给 xHTTP 配置
-        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null && ! grep -q "run --token" /etc/init.d/cloudflared 2>/dev/null; then
-            sleep 8
-            new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
-            if [[ -n "\$new_t_domain" ]]; then
-                echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
-                # 同步修改 xhttpSettings 的 host 头
-                tmp_j=\$(mktemp)
-                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
-                # 重载 Xray 节点使其生效
-                if \$HAS_SYSTEMCTL; then systemctl restart xray; else rc-service xray restart; fi
-            fi
-        fi
     fi
 fi
 EOF
@@ -1304,3 +1290,4 @@ case "$1" in
         main_menu
         ;;
 esac
+
