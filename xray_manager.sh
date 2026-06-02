@@ -526,7 +526,7 @@ EOF
 # --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (WS + Host 强校验模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- 开始配置 CF Tunnel (xHTTP + Packet 强力穿透模式) ---${PLAIN}"
 
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
@@ -591,8 +591,8 @@ install_cf_tunnel() {
         "tag": "$t_node_name",
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
-            "network": "ws", "security": "none",
-            "wsSettings": { "path": "$t_path", "headers": { "Host": "$t_domain" } }
+            "network": "xhttp", "security": "none",
+            "xhttpSettings": { "path": "$t_path", "mode": "packet", "host": "$t_domain" }
         }
     }]
 }
@@ -648,36 +648,112 @@ EOF
 
 # --- 修改参数整合模块  ---
 modify_parameters_menu() {
-    get_current_params
+    get_current_params # 先探测当前值
+    
     clear
-    echo -e "  1. 修改 Xray 节点参数\n  2. 修改 CF Tunnel 参数\n  0. 返回"
-    read -p "选择: " sub_choice
+    echo -e "${BLUE}==============================${PLAIN}"
+    echo -e "${GREEN}        参数修改配置中心       ${PLAIN}"
+    echo -e "${BLUE}==============================${PLAIN}"
+    echo -e "  1. 修改 Xray 节点参数 (域名/UUID/端口等)"
+    echo -e "  2. 修改 CF Tunnel 参数 (Token/路径等)"
+    echo -e "  0. 返回主菜单"
+    echo -e "${BLUE}==============================${PLAIN}"
+    read -p "请选择操作 [0-2]: " sub_choice
+
     case $sub_choice in
         1)
-            read -p "域名 (${old_domain}): " new_domain; new_domain=${new_domain:-$old_domain}
-            read -p "端口 (${old_port}): " new_port; new_port=${new_port:-$old_port}
-            read -p "UUID (${old_uuid}): " new_uuid; new_uuid=${new_uuid:-$old_uuid}
-            read -p "路径 (${old_path}): " new_path; new_path=${new_path:-$old_path}
+            echo -e "\n${YELLOW}>>> 修改 Xray 直连节点 (xHTTP) 参数${PLAIN}"
+            read -p "请输入域名 (当前: ${old_domain:-未设置}): " new_domain
+            new_domain=${new_domain:-$old_domain}
+            read -p "请输入端口 (当前: ${old_port:-未设置}): " new_port
+            new_port=${new_port:-$old_port}
+            read -p "请输入 UUID (当前: ${old_uuid:-未设置}): " new_uuid
+            new_uuid=${new_uuid:-$old_uuid}
+            read -p "请输入路径 (当前: ${old_path:-未设置}): " new_path
+            new_path=${new_path:-$old_path}
+
+            # 调用执行模块 (已包含重启逻辑)
             update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
             ;;
         2)
-            # 兼容保留原版逻辑
+            echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数 (直接回车即跳过)${PLAIN}"
+            
+            # 1. 判定模式并引导输入
             if [[ -f "/usr/local/etc/xray/cf_tunnel_domain" || "$old_t_choice" == "2" ]]; then
+                # --- 固定隧道模式 ---
+                
+                # A. 先改域名
                 local current_t_domain=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
-                read -p "隧道域名 (${current_t_domain}): " new_t_domain; new_t_domain=${new_t_domain:-$current_t_domain}
-                read -p "新 Token: " new_t_token; new_t_token=${new_t_token:-$old_t_token}
-                read -p "新路径 (${old_t_path}): " new_t_path; new_t_path=${new_t_path:-$old_t_path}
+                read -p "请输入隧道对应域名 (当前: ${current_t_domain:-未设置}): " new_t_domain
+                new_t_domain=${new_t_domain:-$current_t_domain}
+
+                # B. 再改 Token
+                read -p "请输入新 Token: " new_t_token
+                new_t_token=${new_t_token:-$old_t_token}
+                
+                # C. 最后是路径
+                read -p "请输入隧道对应路径 (当前: $old_t_path): " new_t_path
+                new_t_path=${new_t_path:-$old_t_path}
+                
+                # 构造启动命令
                 cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
-                echo "$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                
+                # 立即同步域名到本地文件，确保后面生成的链接是正确的
+                if [[ -n "$new_t_domain" ]]; then
+                    echo "$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                fi
             else
-                read -p "新临时路径 (${old_t_path}): " new_t_path; new_t_path=${new_t_path:-$old_t_path}
-                cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}$new_t_path"
+                # --- 临时隧道模式 (只有路径可改) ---
+                read -p "请输入新临时隧道路径 (当前: $old_t_path): " new_t_path
+                new_t_path=${new_t_path:-$old_t_path}
+                new_t_path=${new_t_path:-/}
+                cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}${new_t_path}"
             fi
+            
+            # 1. 重启 Cloudflared
             pkill -9 cloudflared && sleep 1
             nohup /usr/local/bin/cloudflared $cf_cmd > /dev/null 2>&1 &
-            systemctl restart cloudflared >/dev/null 2>&1
-            systemctl restart xray >/dev/null 2>&1
-            read -p "修改完成，回车返回..."
+            
+            # 2. 修正：仅修改隧道专用的 JSON，精准写入 xhttpSettings.path
+            if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
+                local tmp_t=$(mktemp)
+                jq ".inbounds[0].streamSettings.xhttpSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
+            fi
+
+            # 3. 强制重启 Xray 服务以应用配置
+            systemctl restart xray > /dev/null 2>&1 || pkill -9 xray && sleep 1 && nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray > /dev/null 2>&1 &
+
+            # --- 4. 成功看板输出 ---
+            clear
+            echo -e "${GREEN}========================================${PLAIN}"
+            echo -e "${GREEN}      CF Tunnel 参数修改成功并重启       ${PLAIN}"
+            echo -e "${GREEN}========================================${PLAIN}"
+            
+            local t_url=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
+            local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/conf_2_tunnel.json 2>/dev/null)
+            local t_path_enc=$(echo "$new_t_path" | sed 's/\//%2F/g')
+            local t_name="CF_Tunnel_Modified"
+
+            if [[ -n "$t_url" && -n "$t_uuid" ]]; then
+                echo -e "${BLUE}新隧道详情：${PLAIN}"
+                echo -e "  域名: ${t_url}"
+                echo -e "  路径: ${new_t_path}"
+                echo -e "${BLUE}----------------------------------------${PLAIN}"
+                echo -e "${YELLOW}新的隧道节点链接 (VLESS + xHTTP + Packet):${PLAIN}"
+                echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=packet&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
+            else
+                echo -e "${YELLOW}提示：服务已重启，请在“查看节点信息”中确认状态。${PLAIN}"
+            fi
+            echo -e "${GREEN}========================================${PLAIN}"
+            
+            read -p "按回车键返回主菜单..."
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}无效选项，返回主菜单...${PLAIN}"
+            sleep 1
             ;;
     esac
 }
@@ -702,41 +778,116 @@ show_node_info() {
     if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
         local t_name=$(jq -r '.inbounds[0].tag' $XRAY_CONF_TUNNEL)
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
-        local t_path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' $XRAY_CONF_TUNNEL)
+        local t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
-        echo -e "${PURPLE}[隧道节点: $t_name]${PLAIN}\n  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=ws&host=$t_url&path=$(echo "$t_path" | sed 's/\//%2F/g')&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
+        echo -e "${PURPLE}[隧道节点: $t_name]${PLAIN}\n  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=packet&path=$(echo "$t_path" | sed 's/\//%2F/g')&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
     fi
     read -p "按回车键返回菜单..."
 }
 
-# --- 卸载相关控制 ---
+# ---  仅卸载 Xray (保留 CF Tunnel) ---
 uninstall_xray() {
+    echo -e "${RED}警告：此操作将仅卸载 Xray 核心、直连节点配置及证书。${PLAIN}"
+    read -p "确定要卸载 Xray 吗？[y/n]: " confirm
+    [[ "$confirm" != "y" ]] && return
+
+    echo -e "${YELLOW}正在停止 Xray 服务...${PLAIN}"
     systemctl stop xray >/dev/null 2>&1
+    systemctl disable xray >/dev/null 2>&1
     pkill -9 xray >/dev/null 2>&1
-    rm -f /etc/systemd/system/xray.service /etc/init.d/xray
-    rm -rf /usr/local/etc/xray/conf_1_direct.json /usr/local/bin/xray
-    echo -e "${GREEN}Xray 卸载完成。${PLAIN}"
+
+    echo -e "${YELLOW}清理 Xray 文件及配置...${PLAIN}"
+    rm -f /etc/systemd/system/xray.service
+    if [ -f "/etc/init.d/xray" ]; then
+        rc-update del xray default >/dev/null 2>&1
+        rm -f /etc/init.d/xray
+    fi
+    systemctl daemon-reload
+    
+    rm -rf /usr/local/etc/xray/conf_1_direct.json
+    rm -rf /usr/local/etc/xray/certs
+    rm -f /usr/local/bin/xray
+    rm -f /usr/local/share/xray
+    rm -f /var/log/xray/access.log /var/log/xray/error.log
+    
+    echo -e "${GREEN}Xray 及直连节点卸载完成！(若安装了 CF Tunnel，则隧道仍保留运行)${PLAIN}"
+    read -p "按回车键返回..."
 }
+
+# --- 仅卸载 CF Tunnel (保留 Xray) ---
 uninstall_cf() {
+    echo -e "${RED}警告：此操作将仅卸载 Cloudflare Tunnel 及隧道节点配置。${PLAIN}"
+    read -p "确定要卸载 CF Tunnel 吗？[y/n]: " confirm
+    [[ "$confirm" != "y" ]] && return
+
+    echo -e "${YELLOW}正在停止 Cloudflared 服务...${PLAIN}"
     systemctl stop cloudflared >/dev/null 2>&1
+    systemctl disable cloudflared >/dev/null 2>&1
     pkill -9 cloudflared >/dev/null 2>&1
-    rm -f /etc/systemd/system/cloudflared.service /etc/init.d/cloudflared /usr/local/bin/cloudflared
-    echo -e "${GREEN}Tunnel 卸载完成。${PLAIN}"
+
+    echo -e "${YELLOW}清理 Cloudflared 文件及配置...${PLAIN}"
+    rm -f /etc/systemd/system/cloudflared.service
+    if [ -f "/etc/init.d/cloudflared" ]; then
+        rc-update del cloudflared default >/dev/null 2>&1
+        rm -f /etc/init.d/cloudflared
+    fi
+    systemctl daemon-reload
+    
+    rm -f /usr/local/bin/cloudflared
+    rm -f /tmp/cloudflared.log
+    rm -f /usr/local/etc/xray/cf_tunnel_domain
+    
+    if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
+        rm -f /usr/local/etc/xray/conf_2_tunnel.json
+        systemctl restart xray >/dev/null 2>&1
+    fi
+    
+    echo -e "${GREEN}CF Tunnel 卸载完成！(Xray 直连节点仍正常保留)${PLAIN}"
+    read -p "按回车键返回..."
 }
+
+# ---  彻底卸载 (全环境清理版) ---
 uninstall_all() {
-    uninstall_xray
-    uninstall_cf
-    rm -rf /usr/local/etc/xray ~/.acme.sh
-    crontab -l 2>/dev/null | grep -vE "xray_keep_alive|cleanup_logs" | crontab -
-    echo -e "${GREEN}环境已彻底清理干净。${PLAIN}"
-}
-uninstall_menu() {
-    clear
-    echo -e "1. 卸载 Xray\n2. 卸载 CF Tunnel\n3. 彻底卸载全部"
-    read -p "选择: " un_choice
-    [[ "$un_choice" == "1" ]] && uninstall_xray
-    [[ "$un_choice" == "2" ]] && uninstall_cf
-    [[ "$un_choice" == "3" ]] && uninstall_all
+    echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及服务 ！！！${PLAIN}"
+    read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
+    [[ "$confirm" != "y" ]] && return
+
+    echo -e "${YELLOW}[1/5] 正在停止相关服务与进程...${PLAIN}"
+    systemctl stop xray cloudflared >/dev/null 2>&1
+    pkill -9 xray >/dev/null 2>&1
+    pkill -9 cloudflared >/dev/null 2>&1
+
+    echo -e "${YELLOW}[2/5] 正在移除服务定义与自启动配置...${PLAIN}"
+    systemctl disable xray cloudflared >/dev/null 2>&1
+    rm -f /etc/systemd/system/xray.service /etc/systemd/system/cloudflared.service
+    
+    if command -v rc-update >/dev/null 2>&1; then
+        rc-update del xray default >/dev/null 2>&1
+        rc-update del cloudflared default >/dev/null 2>&1
+        rm -f /etc/init.d/xray /etc/init.d/cloudflared
+    fi
+    systemctl daemon-reload
+
+    echo -e "${YELLOW}[3/5] 正在清理安装目录与核心文件...${PLAIN}"
+    rm -rf /usr/local/etc/xray
+    rm -f /usr/local/bin/xray /usr/local/bin/cloudflared
+
+    echo -e "${YELLOW}[4/5] 正在清理日志、证书及临时数据...${PLAIN}"
+    rm -f /tmp/cloudflared.log /var/log/xray_keep_alive.log
+    rm -rf ~/.acme.sh
+
+    echo -e "${YELLOW}[5/5] 正在释放守护任务与系统别名...${PLAIN}"
+    rm -f /usr/local/bin/xray_keep_alive.sh
+    crontab -l 2>/dev/null | grep -vE "acme.sh|xray_keep_alive.sh|cleanup_logs" | crontab - >/dev/null 2>&1
+    
+    if [[ -f ~/.bashrc ]]; then
+        sed -i '/acme.sh/d' ~/.bashrc
+    fi
+
+    echo -e "------------------------------------------------"
+    echo -e "${GREEN}彻底卸载完成！系统已恢复至干净状态。${PLAIN}"
+    echo -e "------------------------------------------------"
+    read -p "按回车键返回菜单..."
 }
 
 # --- 自动获得当前参数缓存 ---
@@ -799,7 +950,7 @@ if [[ -f "/usr/local/bin/cloudflared" ]]; then
                 echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
                 # 同步修改配置文件中的 Host 头
                 tmp_j=\$(mktemp)
-                jq ".inbounds[0].streamSettings.wsSettings.headers.Host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
+                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
                 # 重载 Xray 节点
                 if \$HAS_SYSTEMCTL; then systemctl restart xray; else pkill -9 xray; fi
             fi
@@ -815,6 +966,29 @@ EOF
     (crontab -l 2>/dev/null | grep -v "reboot /usr/local/bin/xray_keep_alive.sh"; echo "@reboot /usr/local/bin/xray_keep_alive.sh") | crontab -
 
     [[ "$1" != "silent" ]] && echo -e "${GREEN}维护守护任务配置成功！已解决开机断流与闪退问题。${PLAIN}" && read -p "按回车返回..."
+}
+
+# --- 卸载子菜单控制台 ---
+uninstall_menu() {
+    while true; do
+        clear
+        echo -e "
+${CYAN}==========================================
+             ⚙️ 卸载管理菜单
+==========================================${PLAIN}
+ ${YELLOW}1.${PLAIN} 仅卸载 Xray (VLESS+xhttp) 及证书
+ ${YELLOW}2.${PLAIN} 仅卸载 Cloudflare Tunnel 隧道
+ ${RED}3.${PLAIN} 彻底卸载所有组件 (包含脚本数据)
+ ${YELLOW}0.${PLAIN} 返回主菜单"
+        read -p "选择 [0-3]: " un_choice
+        case $un_choice in
+            1) uninstall_xray ; break ;;
+            2) uninstall_cf ; break ;;
+            3) uninstall_all ; break ;;
+            0) break ;;
+            *) echo -e "${RED}输入错误${PLAIN}" && sleep 1 ;;
+        esac
+    done
 }
 
 # --- 主菜单 ---
