@@ -4,7 +4,7 @@
 [[ $EUID -ne 0 ]] && echo -e "\033[0;31m错误: 必须使用 root 用户运行此脚本！\033[0m" && exit 1
 
 # ====================================================
-# Project: Xray xhttp & CF Tunnel 一键脚本 (修复版)
+# Project: Xray xhttp & CF Tunnel 一键脚本 (完美修复版)
 # Author: BoGe & User (caojiaxia)
 # System: Debian/Ubuntu/CentOS/Alpine
 # ====================================================
@@ -74,7 +74,6 @@ check_network_strategy() {
         return 0
     fi
 
-    # 修复核心：采用纯 IPv6 权威检测源，防止双栈 DNS 降级解析
     if curl -6 -s --max-time 5 https://6.ipw.cn > /dev/null 2>&1 || curl -6 -s --max-time 5 https://ipv6.google.com > /dev/null 2>&1; then
         strategy="UseIPv6"
         echo -e "${GREEN}[检测] 环境支持 IPv6，已成功启用 IPv6 优先模式。${PLAIN}"
@@ -227,13 +226,11 @@ restart_and_check() {
         pgrep -x "xray" > /dev/null && started=true
     fi
 
-    # 修复核心：如果系统服务没有跑起来，通过 nohup 守护，并注册系统挂载守护
     if [ "$started" = false ]; then
         nohup "$X_BIN" run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
         sleep 4
         if ps w | grep -v grep | grep -q "xray"; then
             started=true
-            # 注入 rc.local 或 crontab 开机启动项，确保重启不失效
             if [[ -f /etc/rc.local ]]; then
                 grep -q "xray run" /etc/rc.local || sed -i -e '$i \nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &\n' /etc/rc.local
             fi
@@ -301,7 +298,6 @@ install_base() {
         sync && echo 3 > /proc/sys/vm/drop_caches
     fi
 
-    # 修复核心：重构 Systemd 配置，增加网络就绪强依赖和启动延迟，避免开机闪退
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/xray.service
 [Unit]
@@ -481,7 +477,6 @@ install_vless_direct() {
 
     local alpn_json=$(echo "$alpn" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')
 
-    # 修复核心：确保安装直连节点时也自动追加出站路由策略
     if [[ ! -f "$XRAY_CONF_DIR/conf_0_core.json" ]]; then
         cat <<EOF > "$XRAY_CONF_DIR/conf_0_core.json"
 {
@@ -515,7 +510,6 @@ EOF
 
     if restart_and_check; then
         echo -e "${GREEN}VLESS+xhttp+TLS 部署成功！${PLAIN}"
-        # 自动触发一次强力守护任务注册，保证重启有效
         setup_cron_job "silent"
         show_node_info
     else
@@ -526,7 +520,7 @@ EOF
 # --- 3. 安装 CF Tunnel  ---
 install_cf_tunnel() {
     install_base
-    echo -e "${PURPLE}--- 开始配置 CF Tunnel (xHTTP + Packet 强力穿透模式) ---${PLAIN}"
+    echo -e "${PURPLE}--- 开始配置 CF Tunnel (xHTTP + Host 强校验模式) ---${PLAIN}"
 
     local r_t_uuid=$(cat /proc/sys/kernel/random/uuid)
     local r_t_path="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
@@ -592,7 +586,7 @@ install_cf_tunnel() {
         "settings": { "clients": [{"id": "$t_uuid"}], "decryption": "none" },
         "streamSettings": {
             "network": "xhttp", "security": "none",
-            "xhttpSettings": { "path": "$t_path", "mode": "packet", "host": "$t_domain" }
+            "xhttpSettings": { "path": "$t_path", "mode": "auto", "host": "$t_domain" }
         }
     }]
 }
@@ -607,7 +601,6 @@ EOF
         cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header $t_domain run --token $t_token"
     fi
 
-    # 修复核心：修复重启失效，完美兼容开机拉起逻辑
     if [ "$HAS_SYSTEMD" = true ]; then
         cat <<EOF > /etc/systemd/system/cloudflared.service
 [Unit]
@@ -646,7 +639,7 @@ EOF
     show_node_info
 }
 
-# --- 修改参数整合模块  ---
+# --- 4. 修改参数整合模块 (严格修复版，纠正为 xhttp 与 auto 模式) ---
 modify_parameters_menu() {
     get_current_params # 先探测当前值
     
@@ -672,33 +665,25 @@ modify_parameters_menu() {
             read -p "请输入路径 (当前: ${old_path:-未设置}): " new_path
             new_path=${new_path:-$old_path}
 
-            # 调用执行模块 (已包含重启逻辑)
             update_xray_config "$new_domain" "$new_port" "$new_uuid" "$new_path"
             ;;
         2)
             echo -e "\n${YELLOW}>>> 修改 CF Tunnel (隧道) 参数 (直接回车即跳过)${PLAIN}"
             
-            # 1. 判定模式并引导输入
             if [[ -f "/usr/local/etc/xray/cf_tunnel_domain" || "$old_t_choice" == "2" ]]; then
                 # --- 固定隧道模式 ---
-                
-                # A. 先改域名
                 local current_t_domain=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
                 read -p "请输入隧道对应域名 (当前: ${current_t_domain:-未设置}): " new_t_domain
                 new_t_domain=${new_t_domain:-$current_t_domain}
 
-                # B. 再改 Token
-                read -p "请输入新 Token: " new_t_token
+                read -p "请输入新 Token (当前: ${old_t_token:0:10}...): " new_t_token
                 new_t_token=${new_t_token:-$old_t_token}
                 
-                # C. 最后是路径
                 read -p "请输入隧道对应路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
                 
-                # 构造启动命令
-                cf_cmd="tunnel --no-autoupdate run --token ${new_t_token}"
+                cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header ${new_t_domain} run --token ${new_t_token}"
                 
-                # 立即同步域名到本地文件，确保后面生成的链接是正确的
                 if [[ -n "$new_t_domain" ]]; then
                     echo "$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
                 fi
@@ -707,23 +692,21 @@ modify_parameters_menu() {
                 read -p "请输入新临时隧道路径 (当前: $old_t_path): " new_t_path
                 new_t_path=${new_t_path:-$old_t_path}
                 new_t_path=${new_t_path:-/}
-                cf_cmd="tunnel --no-autoupdate --url http://127.0.0.1:${old_port:-8443}${new_t_path}"
+                cf_cmd="tunnel --no-autoupdate --protocol http2 --http-host-header ${old_t_domain:-"trycloudflare.com"} --url http://127.0.0.1:${old_t_port:-8080}${new_t_path}"
             fi
             
-            # 1. 重启 Cloudflared
             pkill -9 cloudflared && sleep 1
             nohup /usr/local/bin/cloudflared $cf_cmd > /dev/null 2>&1 &
             
-            # 2. 修正：仅修改隧道专用的 JSON，精准写入 xhttpSettings.path
+            # 【完美回正】仅修改隧道专用的 JSON，精准重写 xhttp 路径和 Host
             if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]]; then
                 local tmp_t=$(mktemp)
-                jq ".inbounds[0].streamSettings.xhttpSettings.path = \"$new_t_path\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
+                local target_domain=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
+                jq ".inbounds[0].streamSettings.xhttpSettings.path = \"$new_t_path\" | .inbounds[0].streamSettings.xhttpSettings.host = \"$target_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "$tmp_t" && mv "$tmp_t" /usr/local/etc/xray/conf_2_tunnel.json
             fi
 
-            # 3. 强制重启 Xray 服务以应用配置
-            systemctl restart xray > /dev/null 2>&1 || pkill -9 xray && sleep 1 && nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray > /dev/null 2>&1 &
+            restart_and_check
 
-            # --- 4. 成功看板输出 ---
             clear
             echo -e "${GREEN}========================================${PLAIN}"
             echo -e "${GREEN}      CF Tunnel 参数修改成功并重启       ${PLAIN}"
@@ -739,8 +722,8 @@ modify_parameters_menu() {
                 echo -e "  域名: ${t_url}"
                 echo -e "  路径: ${new_t_path}"
                 echo -e "${BLUE}----------------------------------------${PLAIN}"
-                echo -e "${YELLOW}新的隧道节点链接 (VLESS + xHTTP + Packet):${PLAIN}"
-                echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=packet&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
+                echo -e "${YELLOW}新的隧道节点链接 (VLESS + xHTTP + TLS):${PLAIN}"
+                echo -e "${CYAN}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=auto&path=$t_path_enc&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
             else
                 echo -e "${YELLOW}提示：服务已重启，请在“查看节点信息”中确认状态。${PLAIN}"
             fi
@@ -758,7 +741,7 @@ modify_parameters_menu() {
     esac
 }
 
-# --- 查看当前节点信息与链接 ---
+# --- 查看当前节点信息与链接 (完美回正为 xhttp 格式) ---
 show_node_info() {
     echo -e "\n${CYAN}━━━━━━━━━━━━━━ 当前已部署节点列表 ━━━━━━━━━━━━━━${PLAIN}"
     if [[ -f "$XRAY_CONF_DIRECT" ]]; then
@@ -780,12 +763,12 @@ show_node_info() {
         local t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' $XRAY_CONF_TUNNEL)
         local t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' $XRAY_CONF_TUNNEL)
         local t_url=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
-        echo -e "${PURPLE}[隧道节点: $t_name]${PLAIN}\n  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=packet&path=$(echo "$t_path" | sed 's/\//%2F/g')&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
+        echo -e "${PURPLE}[隧道节点: $t_name]${PLAIN}\n  链接: ${YELLOW}vless://$t_uuid@$t_url:443?security=tls&sni=$t_url&type=xhttp&mode=auto&path=$(echo "$t_path" | sed 's/\//%2F/g')&fp=chrome&alpn=h2%2Chttp%2F1.1#$t_name${PLAIN}"
     fi
     read -p "按回车键返回菜单..."
 }
 
-# ---  仅卸载 Xray (保留 CF Tunnel) ---
+# --- 5.1 仅卸载 Xray (保留 CF Tunnel) ---
 uninstall_xray() {
     echo -e "${RED}警告：此操作将仅卸载 Xray 核心、直连节点配置及证书。${PLAIN}"
     read -p "确定要卸载 Xray 吗？[y/n]: " confirm
@@ -814,7 +797,7 @@ uninstall_xray() {
     read -p "按回车键返回..."
 }
 
-# --- 仅卸载 CF Tunnel (保留 Xray) ---
+# --- 5.2 仅卸载 CF Tunnel (保留 Xray) ---
 uninstall_cf() {
     echo -e "${RED}警告：此操作将仅卸载 Cloudflare Tunnel 及隧道节点配置。${PLAIN}"
     read -p "确定要卸载 CF Tunnel 吗？[y/n]: " confirm
@@ -846,7 +829,7 @@ uninstall_cf() {
     read -p "按回车键返回..."
 }
 
-# ---  彻底卸载 (全环境清理版) ---
+# --- 5.3 彻底卸载 (全环境清理版) ---
 uninstall_all() {
     echo -e "${RED}！！！警告：此操作将彻底删除所有节点配置、证书及服务 ！！！${PLAIN}"
     read -p "确定要清空所有数据并卸载吗？[y/n]: " confirm
@@ -890,85 +873,7 @@ uninstall_all() {
     read -p "按回车键返回菜单..."
 }
 
-# --- 自动获得当前参数缓存 ---
-get_current_params() {
-    if [[ -f "$XRAY_CONF_DIRECT" ]]; then
-        old_domain=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' "$XRAY_CONF_DIRECT")
-        old_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_DIRECT")
-        old_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_DIRECT")
-        old_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_DIRECT")
-    fi
-}
-
-# --- 自动守护任务设置 (修复核心：如果是 Quick Tunnel 临时隧道，重启后自动重新抓取生成新域名并热重载 Xray) ---
-setup_cron_job() {
-    [[ "$1" != "silent" ]] && echo -e "${YELLOW}正在配置自适应高维维护守护任务...${PLAIN}"
-    
-    cat <<EOF > /usr/local/bin/xray_keep_alive.sh
-#!/bin/bash
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
-    HAS_SYSTEMCTL=false
-else
-    HAS_SYSTEMCTL=true
-fi
-
-# 内存低时回收
-free_mem=\$(free -m | awk '/Mem:/ {print \$4}')
-if [ "\$free_mem" -lt 30 ]; then
-    sync && echo 3 > /proc/sys/vm/drop_caches
-fi
-
-# 1. 守护 Xray 核心
-if ! pgrep -x "xray" > /dev/null; then
-    if \$HAS_SYSTEMCTL; then
-        systemctl restart xray >/dev/null 2>&1
-    else
-        rc-service xray restart >/dev/null 2>&1
-    fi
-    sleep 3
-    if ! pgrep -x "xray" > /dev/null; then
-        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
-    fi
-fi
-
-# 2. 守护 Cloudflared 并对临时隧道实现【变动域名自适应热修正】
-if [[ -f "/usr/local/bin/cloudflared" ]]; then
-    if ! pgrep -x "cloudflared" > /dev/null; then
-        if \$HAS_SYSTEMCTL; then
-            systemctl restart cloudflared >/dev/null 2>&1
-        else
-            rc-service cloudflared restart >/dev/null 2>&1
-        fi
-        
-        # 针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名
-        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null; then
-            sleep 8
-            new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
-            if [[ -n "\$new_t_domain" ]]; then
-                echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
-                # 同步修改配置文件中的 Host 头
-                tmp_j=\$(mktemp)
-                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
-                # 重载 Xray 节点
-                if \$HAS_SYSTEMCTL; then systemctl restart xray; else pkill -9 xray; fi
-            fi
-        fi
-    fi
-fi
-EOF
-
-    chmod +x /usr/local/bin/xray_keep_alive.sh
-    (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
-    
-    # 额外在 crontab 中追加开机自启强拉动作（针对无 systemd 环境双保险）
-    (crontab -l 2>/dev/null | grep -v "reboot /usr/local/bin/xray_keep_alive.sh"; echo "@reboot /usr/local/bin/xray_keep_alive.sh") | crontab -
-
-    [[ "$1" != "silent" ]] && echo -e "${GREEN}维护守护任务配置成功！已解决开机断流与闪退问题。${PLAIN}" && read -p "按回车返回..."
-}
-
-# --- 卸载子菜单控制台 ---
+# --- 5.4 卸载子菜单控制台 ---
 uninstall_menu() {
     while true; do
         clear
@@ -991,12 +896,88 @@ ${CYAN}==========================================
     done
 }
 
+# --- 自动获得当前参数缓存 ---
+get_current_params() {
+    if [[ -f "$XRAY_CONF_DIRECT" ]]; then
+        old_domain=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.host' "$XRAY_CONF_DIRECT")
+        old_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_DIRECT")
+        old_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_DIRECT")
+        old_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_DIRECT")
+    fi
+    if [[ -f "$XRAY_CONF_TUNNEL" ]]; then
+        old_t_port=$(jq -r '.inbounds[0].port' "$XRAY_CONF_TUNNEL")
+        old_t_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONF_TUNNEL")
+        old_t_path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "$XRAY_CONF_TUNNEL")
+        old_t_domain=$(cat /usr/local/etc/xray/cf_tunnel_domain 2>/dev/null)
+    fi
+}
+
+# --- 自动守护任务设置 (修复为 xhttp 的变动域名自适应热修正) ---
+setup_cron_job() {
+    [[ "$1" != "silent" ]] && echo -e "${YELLOW}正在配置自适应高维维护守护任务...${PLAIN}"
+    
+    cat <<EOF > /usr/local/bin/xray_keep_alive.sh
+#!/bin/bash
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if ! command -v systemctl >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
+    HAS_SYSTEMCTL=false
+else
+    HAS_SYSTEMCTL=true
+fi
+
+free_mem=\$(free -m | awk '/Mem:/ {print \$4}')
+if [ "\$free_mem" -lt 30 ]; then
+    sync && echo 3 > /proc/sys/vm/drop_caches
+fi
+
+if ! pgrep -x "xray" > /dev/null; then
+    if \$HAS_SYSTEMCTL; then
+        systemctl restart xray >/dev/null 2>&1
+    else
+        rc-service xray restart >/dev/null 2>&1
+    fi
+    sleep 3
+    if ! pgrep -x "xray" > /dev/null; then
+        nohup /usr/local/bin/xray run -confdir /usr/local/etc/xray/ > /dev/null 2>&1 &
+    fi
+fi
+
+if [[ -f "/usr/local/bin/cloudflared" ]]; then
+    if ! pgrep -x "cloudflared" > /dev/null; then
+        if \$HAS_SYSTEMCTL; then
+            systemctl restart cloudflared >/dev/null 2>&1
+        else
+            rc-service cloudflared restart >/dev/null 2>&1
+        fi
+        
+        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null; then
+            sleep 8
+            new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
+            if [[ -n "\$new_t_domain" ]]; then
+                echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                tmp_j=\$(mktemp)
+                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
+                if \$HAS_SYSTEMCTL; then systemctl restart xray; else pkill -9 xray; fi
+            fi
+        fi
+    fi
+fi
+EOF
+
+    chmod +x /usr/local/bin/xray_keep_alive.sh
+    (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
+    (crontab -l 2>/dev/null | grep -v "reboot /usr/local/bin/xray_keep_alive.sh"; echo "@reboot /usr/local/bin/xray_keep_alive.sh") | crontab -
+
+    [[ "$1" != "silent" ]] && echo -e "${GREEN}维护守护任务配置成功！已解决开机断流与闪退问题。${PLAIN}" && read -p "按回车返回..."
+}
+
 # --- 主菜单 ---
 main_menu() {
     while true; do
         clear
         echo -e "${CYAN}==========================================
-     BoGe Xray & CF Tunnel 一键脚本 (修复版)
+     BoGe Xray & CF Tunnel 一键脚本 (完美修复版)
 ==========================================${PLAIN}
  ${YELLOW}1.${PLAIN} 安装 VLESS+xhttp+TLS (直连/CDN)
  ${YELLOW}2.${PLAIN} 安装 CF Tunnel (隧道模式)
