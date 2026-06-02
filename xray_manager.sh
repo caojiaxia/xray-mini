@@ -83,9 +83,10 @@ check_network_strategy() {
     fi
 
     # --- 原有探测逻辑 (仅在资源充足时执行) ---
+    #  优化 IPv6 优先
     if curl -6 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
-        strategy="UseIPv6"
-        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式。${PLAIN}"
+        strategy="PreferIPv6"
+        echo -e "${GREEN}[检测] 环境支持 IPv6，将启用 IPv6 优先模式 (PreferIPv6)。${PLAIN}"
     elif curl -4 -s --max-time 3 https://www.google.com > /dev/null 2>&1; then
         strategy="UseIPv4"
         echo -e "${YELLOW}[提醒] 环境不支持 IPv6，已切换至 IPv4 优先模式。${PLAIN}"
@@ -212,66 +213,84 @@ restart_and_check() {
 
 # --- 1. 基础环境安装 ---
 install_base() {
-    # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
-    echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
-    # 清理 IPv4
-    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
-    iptables -F && iptables -X && iptables -Z
-    
-    # 清理 IPv6
-    if command -v ip6tables &> /dev/null; then
-        ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
-        ip6tables -F && ip6tables -X && ip6tables -Z
-    fi
-    
-    # 清理 nftables (针对 Debian 12+)
-    if command -v nft &> /dev/null; then
-        nft flush ruleset
-    fi
+    #  修复重复下载逻辑，增加基础依赖包和核心文件存在性检测
+    local needs_dependencies=false
+    for cmd in curl wget jq socat openssl tar lsof unzip; do
+        if ! command -v "$cmd" &>/dev/null; then
+            needs_dependencies=true
+            break
+        fi
+    done
 
-    detect_arch
-    echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
-    
-    # 在所有系统的安装列表中增加 unzip
-    if grep -qi "alpine" /etc/os-release; then
-        # 修复目录缺失
-        mkdir -p /var/spool/cron/crontabs
-        apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
-    elif [[ -f /usr/bin/apt ]]; then
-        # Debian/Ubuntu 增加 unzip
-        apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
+    if [ "$needs_dependencies" = true ]; then
+        # --- 自动清理双栈防火墙 (确保独立 IPv6 申请证书顺畅) ---
+        echo -e "${YELLOW}正在放行双栈所有端口...${PLAIN}"
+        # 清理 IPv4
+        iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
+        iptables -F && iptables -X && iptables -Z
+        
+        # 清理 IPv6
+        if command -v ip6tables &> /dev/null; then
+            ip6tables -P INPUT ACCEPT && ip6tables -P FORWARD ACCEPT && ip6tables -P OUTPUT ACCEPT
+            ip6tables -F && ip6tables -X && ip6tables -Z
+        fi
+        
+        # 清理 nftables (针对 Debian 12+)
+        if command -v nft &> /dev/null; then
+            nft flush ruleset
+        fi
+
+        detect_arch
+        echo -e "${BLUE}[进度] 正在安装系统基础依赖...${PLAIN}"
+        
+        # 在所有系统的安装列表中增加 unzip
+        if grep -qi "alpine" /etc/os-release; then
+            # 修复目录缺失
+            mkdir -p /var/spool/cron/crontabs
+            apk update && apk add bash curl wget jq socat cronie openssl tar lsof net-tools libc6-compat gcompat libstdc++ openrc unzip >/dev/null 2>&1
+        elif [[ -f /usr/bin/apt ]]; then
+            # Debian/Ubuntu 增加 unzip
+            apt update && apt install -y curl wget jq socat cron openssl tar lsof net-tools unzip >/dev/null 2>&1
+        else
+            # CentOS/Yum 增加 unzip
+            yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
+        fi
     else
-        # CentOS/Yum 增加 unzip
-        yum install -y curl wget jq socat crontabs openssl tar lsof net-tools unzip >/dev/null 2>&1
+        detect_arch
+        echo -e "${GREEN}[跳过] 基础依赖已完整存在，无需重复配置与更新包管理器。${PLAIN}"
     fi
     
     check_network_strategy
     mkdir -p /usr/local/etc/xray "$CERT_DIR" /usr/local/bin
 
     # --- 获取最新版 Xray 核心链接 ---
-    echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
-    local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-    local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
-    
-    echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
-    wget -O /tmp/xray.zip "$download_url"
-
-    # 检查压缩包是否下载成功
-    if [[ ! -s /tmp/xray.zip ]]; then
-        echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
-        exit 1
-    fi
-    
-    unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
-    rm -f /tmp/xray.zip
-
-    # 显式检查解压出的文件是否存在
     if [[ ! -f /usr/local/bin/xray ]]; then
-        echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
-        exit 1
-    fi
+        echo -e "${YELLOW}正在获取最新版 Xray 核心链接...${PLAIN}"
+        local latest_ver=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
+        local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_ver}/Xray-linux-${XRAY_ARCH}.zip"
+        
+        echo -e "${YELLOW}正在手动下载 Xray 核心 ($latest_ver)...${PLAIN}"
+        wget -O /tmp/xray.zip "$download_url"
 
-    chmod +x /usr/local/bin/xray
+        # 检查压缩包是否下载成功
+        if [[ ! -s /tmp/xray.zip ]]; then
+            echo -e "${RED}[错误] 核心压缩包下载失败，请检查网络或磁盘空间！${PLAIN}"
+            exit 1
+        fi
+        
+        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray
+        rm -f /tmp/xray.zip
+
+        # 显式检查解压出的文件是否存在
+        if [[ ! -f /usr/local/bin/xray ]]; then
+            echo -e "${RED}[致命错误] Xray 核心解压失败，可能是磁盘空间已满。${PLAIN}"
+            exit 1
+        fi
+
+        chmod +x /usr/local/bin/xray
+    else
+        echo -e "${GREEN}[跳过] Xray 核心文件已存在，无需重复下载。${PLAIN}"
+    fi
 
     # --- 修复内存清理报错：增加权限判断 ---
     echo -e "${YELLOW}尝试清理系统缓存...${PLAIN}"
@@ -1184,6 +1203,20 @@ if [[ -f "/usr/local/bin/cloudflared" ]]; then
         else
             rc-service cloudflared restart >/dev/null 2>&1
         fi
+        
+        # 【修改项 4】：针对临时隧道的极端处理：如果重启了，动态抓取新分配的 trycloudflare 域名并热同步给 xHTTP 配置
+        if [[ -f "/usr/local/etc/xray/conf_2_tunnel.json" ]] && ! grep -q "run --token" /etc/systemd/system/cloudflared.service 2>/dev/null && ! grep -q "run --token" /etc/init.d/cloudflared 2>/dev/null; then
+            sleep 8
+            new_t_domain=\$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare.com" /tmp/cloudflared.log 2>/dev/null | head -n 1 | sed 's/https:\/\///')
+            if [[ -n "\$new_t_domain" ]]; then
+                echo "\$new_t_domain" > /usr/local/etc/xray/cf_tunnel_domain
+                # 同步修改 xhttpSettings 的 host 头
+                tmp_j=\$(mktemp)
+                jq ".inbounds[0].streamSettings.xhttpSettings.host = \"\$new_t_domain\"" /usr/local/etc/xray/conf_2_tunnel.json > "\$tmp_j" && mv "\$tmp_j" /usr/local/etc/xray/conf_2_tunnel.json
+                # 重载 Xray 节点使其生效
+                if \$HAS_SYSTEMCTL; then systemctl restart xray; else rc-service xray restart; fi
+            fi
+        fi
     fi
 fi
 EOF
@@ -1192,6 +1225,8 @@ EOF
 
     # 写入 crontab，并清理旧任务
     (crontab -l 2>/dev/null | grep -v "xray_keep_alive.sh"; echo "* * * * * /usr/local/bin/xray_keep_alive.sh") | crontab -
+    # 额外在 crontab 中追加开机自启强拉动作（针对无 systemd 环境双保险）
+    (crontab -l 2>/dev/null | grep -v "reboot /usr/local/bin/xray_keep_alive.sh"; echo "@reboot /usr/local/bin/xray_keep_alive.sh") | crontab -
     
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e "${GREEN}  全兼容优化版守护已开启！                  ${PLAIN}"
