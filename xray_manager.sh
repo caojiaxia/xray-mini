@@ -1269,10 +1269,6 @@ fi
 EOF
 
 case "$1" in
-    "cleanup_logs")
-        cleanup_logs "silent"
-        ;;
-    *)
-        main_menu
-        ;;
+    "cleanup_logs") cleanup_logs "silent" ;;
+    *) main_menu ;;
 esac
