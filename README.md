@@ -17,7 +17,7 @@ xray-mini 是一款自动化部署脚本。它通过 Systemd 守护进程解决�
 
 
 ### 🛠️ 快速部署
-**纯IPv6机器，请设置NAT64执行以下命令：（否则请忽略）**
+**纯IPv6机器，请设置NAT64。执行以下命令：（否则请忽略）**
 ```
 sed -i "1i\nameserver 2a00:1098:2b::1\nnameserver 2a00:1098:2c::1\nnameserver 2a01:4f8:c2c:123f::1\nnameserver 2a01:4f9:c010:3f02::1" /etc/resolv.conf
 ```
